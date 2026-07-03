@@ -1,56 +1,52 @@
+/*s: 8l/compat.c */
 #include	"l.h"
 
+/*s: function [[malloc]] */
 /*
  * fake malloc
  */
 void*
 malloc(ulong n)
 {
-	void *p;
+    void *p;
 
-	while(n & 7)
-		n++;
-	while(nhunk < n)
-		gethunk();
-	p = hunk;
-	nhunk -= n;
-	hunk += n;
-	return p;
+    // upper_round(n, 8)
+    while(n & 7)
+        n++;
+
+    while(nhunk < n)
+        gethunk();
+    p = hunk;
+    nhunk -= n;
+    hunk += n;
+    return p;
 }
+/*e: function [[malloc]] */
 
+/*s: function [[free]] */
 void
 free(void *p)
 {
-	USED(p);
+    USED(p);
 }
+/*e: function [[free]] */
 
-void*
-calloc(ulong m, ulong n)
+/*s: function [[setmalloctag]] */
+//@Scheck: looks dead, but because we redefine malloc/free we must also redefine that
+void setmalloctag(void *v, ulong pc)
 {
-	void *p;
-
-	n *= m;
-	p = malloc(n);
-	memset(p, 0, n);
-	return p;
+    USED(v, pc);
 }
+/*e: function [[setmalloctag]] */
 
-void*
-realloc(void*, ulong)
+/*s: function [[fileexists]] */
+int
+fileexists(char *s)
 {
-	fprint(2, "realloc called\n");
-	abort();
-	return 0;
-}
+    byte dirbuf[400];
 
-void*
-mysbrk(ulong size)
-{
-	return sbrk(size);
+    /* it's fine if stat result doesn't fit in dirbuf, since even then the file exists */
+    return stat(s, dirbuf, sizeof(dirbuf)) >= 0;
 }
-
-void
-setmalloctag(void *v, ulong pc)
-{
-	USED(v, pc);
-}
+/*e: function [[fileexists]] */
+/*e: 8l/compat.c */

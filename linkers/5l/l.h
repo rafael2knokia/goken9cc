@@ -1,412 +1,472 @@
-#include	<u.h>
-#include	<libc.h>
-#include	<bio.h>
-#include	"../5l/5.out.h"
-#include	"../lk/elf.h"
+/*s: 5l/l.h */
+#include    <u.h>
+#include    <libc.h>
+#include    <bio.h>
 
-#ifndef	EXTERN
-#define	EXTERN	extern
-#endif
+#include    <common.out.h>
+#include    <5.out.h>
 
-#define	LIBNAMELEN	300
+#include    "../8l/elf.h"
 
-void	addlibpath(char*);
-char*	findlib(char*);
+//----------------------------------------------------------------------------
+// Data structures and constants
+//----------------------------------------------------------------------------
 
-typedef	struct	Adr	Adr;
-typedef	struct	Sym	Sym;
-typedef	struct	Autom	Auto;
-typedef	struct	Prog	Prog;
-typedef	struct	Optab	Optab;
-typedef	struct	Oprang	Oprang;
-typedef	uchar	Opcross[32][2][32];
-typedef	struct	Count	Count;
+// forward decls
+typedef struct  Adr     Adr;
+typedef struct  Auto    Auto;
+typedef struct  Prog    Prog;
+typedef struct  Sym     Sym;
 
-#define	P		((Prog*)0)
-#define	S		((Sym*)0)
-#define	TNAME		(curtext&&curtext->from.sym?curtext->from.sym->name:noname)
-
-struct	Adr
+/*s: struct [[Adr]](arm) */
+struct  Adr
 {
-	union
-	{
-		long	u0offset;
-		char*	u0sval;
-		Ieee*	u0ieee;
-	} u0;
-	union
-	{
-		Auto*	u1autom;
-		Sym*	u1sym;
-	} u1;
-	char	type;
-	char	reg;
-	char	name;
-	char	class;
+    // enum<Operand_kind> (D_NONE by default)
+    short   type;
+
+    // switch on Operand.type
+    union {
+        long    offset;
+        Ieee*   ieee;
+        char*   sval;
+    };
+
+    // option<enum<Register>> None = R_NONE
+    short   reg; 
+
+    /*s: [[Adr]] other fields */
+    // enum<Sym_kind>
+    short   symkind;
+    // option<ref<Sym>> (owner = hash)
+    Sym*    sym;
+    /*x: [[Adr]] other fields */
+    // option<enum<Operand_class>>, 0 means None, i means i-1 is the class you want
+    short   class;
+    /*x: [[Adr]] other fields */
+    // list<ref_own<Auto> (next = Auto.link), only used by TEXT instruction
+    Auto*   autom;
+    /*e: [[Adr]] other fields */
 };
+/*e: struct [[Adr]](arm) */
 
-#define	offset	u0.u0offset
-#define	sval	u0.u0sval
-#define	ieee	u0.u0ieee
-
-#define	autom	u1.u1autom
-#define	sym	u1.u1sym
-
-struct	Prog
+/*s: struct [[Prog]](arm) */
+struct  Prog
 {
-	Adr	from;
-	Adr	to;
-	union
-	{
-		long	u0regused;
-		Prog*	u0forwd;
-	} u0;
-	Prog*	cond;
-	Prog*	link;
-	long	pc;
-	long	line;
-	uchar	mark;
-	uchar	optab;
-	uchar	as;
-	uchar	scond;
-	uchar	reg;
+    //enum<Opcode>
+    byte    as;
+
+    // operands
+    Adr from;
+    Adr to;
+
+    /*s: [[Prog]] other fields */
+    // option<enum<Register>>, None = R_NONE
+    short   reg;
+    /*x: [[Prog]] other fields */
+    // enum<Instr_cond>
+    byte    scond;
+    /*x: [[Prog]] other fields */
+    long    line;
+    /*x: [[Prog]] other fields */
+    // virtual program counter, and then real program counter
+    long    pc;
+    /*x: [[Prog]] other fields */
+    //bitset<enum<Mark>>
+    short   mark;
+    /*x: [[Prog]] other fields */
+    Prog*   forwd;
+    /*x: [[Prog]] other fields */
+    // option<index in optab[] (1-based)>, 0 means None, i means optab[i-1]
+    byte    optab;
+    /*e: [[Prog]] other fields */
+
+    // Extra
+    /*s: [[Prog]] extra fields */
+    // option<ref<Prog>> for branch instructions
+    // (abused to list<ref<Prog>> (from = textp for TEXT instructions))
+    // (abused also for instructions using large constants)
+    Prog*   cond;
+    /*x: [[Prog]] extra fields */
+    // list<ref<Prog>> (from = firstp or datap)
+    Prog*   link;
+    /*e: [[Prog]] extra fields */
 };
-#define	regused	u0.u0regused
-#define	forwd	u0.u0forwd
+/*e: struct [[Prog]](arm) */
+/*s: constant [[P]] */
+#define P       ((Prog*)nil)
+/*e: constant [[P]] */
 
-struct	Sym
+/*s: struct [[Sym]] */
+struct  Sym
 {
-	char	*name;
-	short	type;
-	short	version;
-	short	become;
-	short	frame;
-	uchar	subtype;
-	ushort	file;
-	long	value;
-	long	sig;
-	Sym*	link;
+    // The key
+    // ref_own<string>
+    char    *name;
+    // 0 for global symbols, object file id for private symbols
+    short   version; 
+
+    // The generic value, 
+    // e.g., virtual pc for a TEXT procedure, size for GLOBL
+    long    value; 
+
+    /*s: [[Sym]] section field */
+    //enum<Section>
+    short   type;
+    /*e: [[Sym]] section field */
+
+    /*s: [[Sym]] other fields */
+    // for instance last 32 bits of md5sum of the type of the symbol
+    ulong   sig;
+    /*x: [[Sym]] other fields */
+    // index in filen[]
+    ushort  file;
+    /*x: [[Sym]] other fields */
+    // enum<Section> too?
+    short   subtype;
+    /*x: [[Sym]] other fields */
+    // x86 only, dead? can remove though?
+    short   become;
+    /*x: [[Sym]] other fields */
+    // x86 only
+    short   frame;
+    /*e: [[Sym]] other fields */
+    // Extra
+    /*s: [[Sym]] extra fields */
+    // list<ref<Sym>> (from = hash)
+    Sym*    link;
+    /*e: [[Sym]] extra fields */
 };
+/*e: struct [[Sym]] */
+/*s: constant [[S]] */
+#define S       ((Sym*)nil)
+/*e: constant [[S]] */
 
-#define SIGNINTERN	(1729*325*1729)
-
-struct	Autom
+/*s: enum [[Section]](arm) */
+enum Section
 {
-	Sym*	asym;
-	Auto*	link;
-	long	aoffset;
-	short	type;
+    SNONE = 0,
+
+    STEXT,
+    SDATA,
+    SBSS,
+
+    SXREF,
+    /*s: [[Section]] cases */
+    SFILE,
+    /*x: [[Section]] cases */
+    SIMPORT,
+    SEXPORT,
+    /*x: [[Section]] cases */
+    SUNDEF,
+    /*x: [[Section]] cases */
+    SDATA1,
+    /*x: [[Section]] cases */
+    SSTRING, // arm
+    /*e: [[Section]] cases */
 };
-struct	Optab
-{
-	char	as;
-	char	a1;
-	char	a2;
-	char	a3;
-	char	type;
-	char	size;
-	char	param;
-	char	flag;
-};
-struct	Oprang
-{
-	Optab*	start;
-	Optab*	stop;
-};
-struct	Count
-{
-	long	count;
-	long	outof;
-};
+/*e: enum [[Section]](arm) */
 
-enum
-{
-	STEXT		= 1,
-	SDATA,
-	SBSS,
-	SDATA1,
-	SXREF,
-	SLEAF,
-	SFILE,
-	SCONST,
-	SSTRING,
-	SUNDEF,
-
-	SIMPORT,
-	SEXPORT,
-
-	LFROM		= 1<<0,
-	LTO		= 1<<1,
-	LPOOL		= 1<<2,
-	V4		= 1<<3,	/* arm v4 arch */
-	VFP		= 1<<4,	/* arm vfpv3 floating point */
-
-	C_NONE		= 0,
-	C_REG,
-	C_REGREG,
-	C_SHIFT,
-	C_FREG,
-	C_PSR,
-	C_FCR,
-
-	C_RCON,		/* 0xff rotated */
-	C_NCON,		/* ~RCON */
-	C_SCON,		/* 0xffff */
-	C_LCON,
-	C_FCON,
-
-	C_RACON,
-	C_LACON,
-
-	C_RECON,
-	C_LECON,
-
-	C_SBRA,
-	C_LBRA,
-
-	C_HAUTO,	/* halfword insn offset (-0xff to 0xff) */
-	C_FAUTO,	/* float insn offset (0 to 0x3fc, word aligned) */
-	C_HFAUTO,	/* both H and F */
-	C_SAUTO,	/* -0xfff to 0xfff */
-	C_LAUTO,
-
-	C_HEXT,
-	C_FEXT,
-	C_HFEXT,
-	C_SEXT,
-	C_LEXT,
-
-	C_HOREG,
-	C_FOREG,
-	C_HFOREG,
-	C_SOREG,
-	C_ROREG,
-	C_SROREG,	/* both S and R */
-	C_LOREG,
-
-	C_ADDR,		/* relocatable address */
-
-	C_GOK,
-
+/*s: enum [[Mark]](arm) */
 /* mark flags */
-	FOLL		= 1<<0,
-	LABEL		= 1<<1,
-	LEAF		= 1<<2,
-
-	BIG		= (1<<12)-4,
-	STRINGSZ	= 200,
-	NHASH		= 10007,
-	NHUNK		= 100000,
-	MINSIZ		= 64,
-	NENT		= 100,
-	MAXIO		= 8192,
-	MAXHIST		= 20,	/* limit of path elements for history symbols */
-
-	Roffset	= 22,		/* no. bits for offset in relocation address */
-	Rindex	= 10,		/* no. bits for index in relocation address */
+enum Mark {
+    /*s: [[Mark]] cases */
+    LEAF        = 1<<2,
+    /*x: [[Mark]] cases */
+    FOLL        = 1<<0,
+    /*e: [[Mark]] cases */
 };
+/*e: enum [[Mark]](arm) */
 
-EXTERN union
+/*s: enum [[headtype]](arm) */
+/*
+ *  -H0                     no header
+ *  -H2 -T4128 -R4096       is plan9 format
+ *  -H7                     is elf
+ */
+enum Headtype {
+     H_NOTHING = 0,
+     H_PLAN9 = 2, // a.k.a H_AOUT
+     H_ELF = 7,
+};
+/*e: enum [[headtype]](arm) */
+
+/*s: struct [[Auto]](arm) */
+struct  Auto
 {
-	struct
-	{
-		uchar	obuf[MAXIO];			/* output buffer */
-		uchar	ibuf[MAXIO];			/* input buffer */
-	} u;
-    //pad: this does not work under recent gcc versions
-	//old: char	dbuf[1];
-} buf;
+    // enum<Sym_kind> (N_LOCAL, N_PARAM, or N_FILE/N_LINE)
+    short   type;
 
-#define	cbuf	u.obuf
-#define	xbuf	u.ibuf
-//pad: simpler
-#define	dbuf	u.obuf
+    // <ref<Sym>>
+    Sym*    asym;
+    long    aoffset;
 
-EXTERN	long	HEADR;			/* length of header */
-EXTERN	int	HEADTYPE;		/* type of header */
-EXTERN	long	INITDAT;		/* data location */
-EXTERN	long	INITRND;		/* data round above text location */
-EXTERN	long	INITTEXT;		/* text location */
-EXTERN	long	INITTEXTP;		/* text location (physical) */
-EXTERN	char*	INITENTRY;		/* entry point */
-EXTERN	long	autosize;
-EXTERN	Biobuf	bso;
-EXTERN	long	bsssize;
-EXTERN	int	cbc;
-EXTERN	uchar*	cbp;
-EXTERN	int	cout;
-EXTERN	Auto*	curauto;
-EXTERN	Auto*	curhist;
-EXTERN	Prog*	curp;
-EXTERN	Prog*	curtext;
-EXTERN	Prog*	datap;
-EXTERN	long	datsize;
-EXTERN	char	debug[128];
-EXTERN	Prog*	etextp;
-EXTERN	Prog*	firstp;
-EXTERN	char	fnuxi4[4];
-EXTERN	char	fnuxi8[8];
-EXTERN	char*	noname;
-EXTERN	Sym*	hash[NHASH];
-EXTERN	Sym*	histfrog[MAXHIST];
-EXTERN	int	histfrogp;
-EXTERN	int	histgen;
-EXTERN	char*	library[50];
-EXTERN	char*	libraryobj[50];
-EXTERN	int	libraryp;
-EXTERN	int	xrefresolv;
-EXTERN	char*	hunk;
-EXTERN	char	inuxi1[1];
-EXTERN	char	inuxi2[2];
-EXTERN	char	inuxi4[4];
-EXTERN	Prog*	lastp;
-EXTERN	long	lcsize;
-EXTERN	char	literal[32];
-EXTERN	int	nerrors;
-EXTERN	long	nhunk;
-EXTERN	long	instoffset;
-EXTERN	Opcross	opcross[8];
-EXTERN	Oprang	oprange[ALAST];
-EXTERN	char*	outfile;
-EXTERN	long	pc;
-EXTERN	uchar	repop[ALAST];
-EXTERN	long	symsize;
-EXTERN	Prog*	textp;
-EXTERN	long	textsize;
-EXTERN	long	thunk;
-EXTERN	int	version;
-EXTERN	char	xcmp[C_GOK+1][C_GOK+1];
-EXTERN	Prog	zprg;
-EXTERN	int	dtype;
-EXTERN	int	armv4;
-EXTERN	int vfp;
+    // Extra
+    /*s: [[Auto]] extra fields */
+    // list<ref<Auto> (head = curauto or Instr.to.autom of TEXT instruction)
+    Auto*   link;
+    /*e: [[Auto]] extra fields */
+};
+/*e: struct [[Auto]](arm) */
 
-EXTERN	int	doexp, dlm;
-EXTERN	int	imports, nimports;
-EXTERN	int	exports, nexports;
-EXTERN	char*	EXPTAB;
-EXTERN	Prog	undefp;
+/*s: enum [[rxxx]] */
+enum rxxx {
+    Roffset = 22,       /* no. bits for offset in relocation address */
+    Rindex  = 10,       /* no. bits for index in relocation address */
+};
+/*e: enum [[rxxx]] */
+/*s: enum [[misc_constant]](arm) */
+enum misc_constants {
+    /*s: constant [[BIG]] */
+    //BIG       = (1<<12)-4,
+    BIG     = 0,
+    /*e: constant [[BIG]] */
 
-#define	UP	(&undefp)
+    /*s: constant [[STRINGSZ]] */
+    STRINGSZ    = 200,
+    /*e: constant [[STRINGSZ]] */
+    /*s: constant NHASH linker */
+    NHASH       = 10007,
+    /*e: constant NHASH linker */
+    /*s: constant NHUNK linker */
+    NHUNK       = 100000,
+    /*e: constant NHUNK linker */
 
-extern	char*	anames[];
-extern	Optab	optab[];
+    /*s: constant [[MINSIZ]] */
+    MINSIZ      = 64,
+    /*e: constant [[MINSIZ]] */
+    /*s: constant [[MAXIO]] */
+    MAXIO       = 8192,
+    /*e: constant [[MAXIO]] */
+    /*s: constant [[MAXHIST]] */
+    MAXHIST     = 20,   /* limit of path elements for history symbols */
+    /*e: constant [[MAXHIST]] */
+};
+/*e: enum [[misc_constant]](arm) */
 
-void	addpool(Prog*, Adr*);
-EXTERN	Prog*	blitrl;
-EXTERN	Prog*	elitrl;
+/*s: constant [[SIGNINTERN]](arm) */
+#define SIGNINTERN  (1729*325*1729)
+/*e: constant [[SIGNINTERN]](arm) */
 
-void	initdiv(void);
-EXTERN	Prog*	prog_div;
-EXTERN	Prog*	prog_divu;
-EXTERN	Prog*	prog_mod;
-EXTERN	Prog*	prog_modu;
+/*s: constant [[LIBNAMELEN]] */
+#define LIBNAMELEN  300
+/*e: constant [[LIBNAMELEN]] */
 
-#pragma	varargck	type	"A"	int
-#pragma	varargck	type	"A"	uint
-#pragma	varargck	type	"C"	int
-#pragma	varargck	type	"D"	Adr*
-#pragma	varargck	type	"N"	Adr*
-#pragma	varargck	type	"P"	Prog*
-#pragma	varargck	type	"S"	char*
+/*s: struct [[Buf]] */
+union Buf
+{
+    struct
+    {
+        char    obuf[MAXIO];            /* output buffer */
+        byte    ibuf[MAXIO];            /* input buffer */
+    };
+    char    dbuf[1]; // variable size
+    //XxX: this cause bugs in kencc under Linux
+};
+/*e: struct [[Buf]] */
 
-#pragma	varargck	argpos	diag 1
+//----------------------------------------------------------------------------
+// Globals
+//----------------------------------------------------------------------------
 
-int	Aconv(Fmt*);
-int	Cconv(Fmt*);
-int	Dconv(Fmt*);
-int	Nconv(Fmt*);
-int	Pconv(Fmt*);
-int	Sconv(Fmt*);
-int	aclass(Adr*);
-void	addhist(long, int);
-void	addlibpath(char*);
-void	append(Prog*, Prog*);
-void	asmb(void);
-void	asmdyn(void);
-void	asmlc(void);
-void	asmout(Prog*, Optab*);
-void	asmsym(void);
-long	atolwhex(char*);
-Prog*	brloop(Prog*);
-void	buildop(void);
-void	buildrep(int, int);
-void	cflush(void);
-void	ckoff(Sym*, long);
-int	chipfloat(Ieee*);
-int	cmp(int, int);
-int	compound(Prog*);
-double	cputime(void);
-void	datblk(long, long, int);
-void	diag(char*, ...);
-void	divsig(void);
-void	dodata(void);
-void	doprof1(void);
-void	doprof2(void);
-void	dynreloc(Sym*, long, int);
-long	entryvalue(void);
-void	errorexit(void);
-void	exchange(Prog*);
-void	export(void);
-int	find1(long, int);
-char*	findlib(char*);
-void	follow(void);
-void	gethunk(void);
-void	histtoauto(void);
-double	ieeedtod(Ieee*);
-long	ieeedtof(Ieee*);
-void	import(void);
-int	isnop(Prog*);
-void	ldobj(int, long, char*);
-void	loadlib(void);
-void	listinit(void);
-Sym*	lookup(char*, int);
-void	cput(int);
-void	llput(vlong);
-void	llputl(vlong);
-void	lput(int32);
-void	lputl(int32);
-void	mkfwd(void);
-void*	mysbrk(ulong);
-void	names(void);
-void	nocache(Prog*);
-void	nuxiinit(void);
-void	objfile(char*);
-int	ocmp(const void*, const void*);
-long	opirr(int);
-Optab*	oplook(Prog*);
-long	oprrr(int, int);
-long	opvfprrr(int, int);
-long	olr(long, int, int, int);
-long	olhr(long, int, int, int);
-long	olrr(int, int, int, int);
-long	olhrr(int, int, int, int);
-long	osr(int, int, long, int, int);
-long	oshr(int, long, int, int);
-long	ofsr(int, int, long, int, int, Prog*);
-long	osrr(int, int, int, int);
-long	oshrr(int, int, int, int);
-long	omvl(Prog*, Adr*, int);
-void	patch(void);
-void	prasm(Prog*);
-void	prepend(Prog*, Prog*);
-Prog*	prg(void);
-int	pseudo(Prog*);
-void	putsymb(char*, int, long, int);
-void	readundefs(char*, int);
-long	regoff(Adr*);
-int	relinv(int);
-long	rnd(long, long);
-void	span(void);
-void	strnput(char*, int);
-void	undef(void);
-void	undefsym(Sym*);
-void	wput(int32);
-void	wputl(int32);
-void	xdefine(char*, int, long);
-void	xfol(Prog*);
-void	zerosig(char*);
-void	noops(void);
-long	immrot(ulong);
-long	immaddr(long);
-long	opbra(int, int);
+// io.c
+extern union Buf buf;
+extern  int     cbc;
+extern  char*   cbp;
+
+// globals.c
+
+extern char	 thechar;
+extern char* thestring;
+
+// configuration
+extern  short   HEADTYPE;       /* type of header */
+extern  long    HEADR;          /* length of header */
+extern  long    INITTEXT;       /* text location */
+extern  long    INITRND;        /* data round above text location */
+extern  long    INITDAT;        /* data location */
+extern  char*   INITENTRY;      /* entry point */
+extern  long    INITTEXTP;      /* text location (physical) */ // ELF
+
+// output
+extern  char*   outfile;
+extern  fdt     cout;
+extern  Biobuf  bso;
+
+// core algorithm
+extern  Sym*    hash[NHASH];
+extern  long    pc;
+extern  Prog    zprg;
+
+extern  Prog*   firstp;
+extern  Prog*   lastp;
+extern  Prog*   datap;
+extern  Prog*   textp;
+extern  Prog*   etextp;
+
+extern  Prog*   curtext;
+extern  Auto*   curauto;
+extern  Auto*   curhist;
+extern  Prog*   curp;
+extern  long    autosize;
+
+// sections size
+extern  long    textsize;
+extern  long    datsize;
+extern  long    bsssize;
+extern  long    symsize;
+extern  long    lcsize;
+
+extern  char*   noname;
+/*s: constant [[TNAME]](arm) */
+#define TNAME (curtext && curtext->from.sym ? curtext->from.sym->name : noname)
+/*e: constant [[TNAME]](arm) */
+
+
+// debugging support
+extern  Sym*    histfrog[MAXHIST];
+extern  int     histfrogp;
+extern  int     histgen;
+
+// library
+extern  int xrefresolv;
+
+// advanced topics
+extern  int armv4;
+extern  int vfp;
+extern  bool doexp;
+extern  bool dlm;
+extern  char*   EXPTAB;
+
+extern  Prog    undefp;
+/*s: constant [[UP]] */
+#define UP  (&undefp)
+/*e: constant [[UP]] */
+
+// debugging
+extern  bool    debug[128];
+extern  char*   anames[];
+
+// utils (for statistics)
+extern  long    thunk;
+extern long nsymbol;
+
+
+/*s: pragmas varargck type */
+#pragma varargck    type    "A" int
+#pragma varargck    type    "A" uint
+#pragma varargck    type    "C" int
+#pragma varargck    type    "D" Adr*
+#pragma varargck    type    "N" Adr*
+#pragma varargck    type    "P" Prog*
+#pragma varargck    type    "S" char*
+/*e: pragmas varargck type */
+/*s: pragmas varargck argpos */
+#pragma varargck    argpos  diag 1
+/*e: pragmas varargck argpos */
+
+//----------------------------------------------------------------------------
+// Functions
+//----------------------------------------------------------------------------
+
+// obj.c
+int     isobjfile(char *f);
+void    objfile(char*);
+
+// lib.c
+void    loadlib(void);
+void    addlibpath(char*);
+char*   findlib(char *file);
+void    addlib(char *obj);
+
+// pass.c
+void    patch(void);
+void    follow(void);
+
+// noops.c
+void    noops(void);
+void    divsig(void);
+void    initdiv(void);
+void    nocache(Prog*);
+
+// layout.c
+void    dodata(void);
+void    dotext(void);
+
+// span.c
+void    buildop(void);
+int     aclass(Adr*);
+long    immrot(ulong);
+long    immaddr(long);
+// oplook() in m.h
+
+long    regoff(Adr*); // for float
+
+// datagen.c
+void    nuxiinit(void);
+void    datblk(long s, long n, bool sstring);
+
+// codegen.c
+// asmout() in m.h
+
+// asm.c
+void    asmb(void);
+
+
+
+// hist.c
+void    addhist(long, int);
+void    histtoauto(void);
+
+// debugging.c
+void asmsym(void);
+void asmlc(void);
+
+// profile.c
+void    doprof1(void);
+void    doprof2(void);
+
+// float.c
+double  ieeedtod(Ieee*);
+long    ieeedtof(Ieee*);
+int chipfloat(Ieee*);
+
+// dynamic.c
+void    zerosig(char*);
+void    readundefs(char*, int);
+void    dynreloc(Sym*, long, int);
+void    asmdyn(void);
+void    import(void);
+void    export(void);
+void    ckoff(Sym*, long);
+
+
+// io.c
+void    cput(int);
+void    lput(long);
+void    lputl(long l);
+void    wput(long);
+void    wputl(long);
+void    cflush(void);
+byte* readsome(fdt f, byte *buf, byte *good, byte *stop, int max);
+
+// error.c
+void    diag(char*, ...);
+void  errorexit(void);
+
+// utils.c
+Sym*  lookup(char*, int);
+Prog* prg(void);
+// and malloc/free/setmalloctag overwrite
+long    atolwhex(char*);
+long    rnd(long, long);
+int     fileexists(char*);
+void  mylog(char*, ...);
+/*s: macro [[DBG]] */
+#define DBG if(debug['v']) mylog
+/*e: macro [[DBG]] */
+
+// fmt.c (dumpers)
+void listinit(void);
+void    prasm(Prog*);
+
+/*e: 5l/l.h */

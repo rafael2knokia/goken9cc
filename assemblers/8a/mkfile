@@ -1,23 +1,26 @@
 TOP=../..
-<$TOP/mkconfig
 <$TOP/mkfiles/$objtype/mkfile
 
 TARG=8a
-LDLIBS=-lbio -l9 -lm
 
-OFILES=\
+OFILES=globals.$O\
 	y.tab.$O\
 	lex.$O\
 
 HFILES=\
-	$TOP/linkers/8l/8.out.h\
 	y.tab.h\
 	a.h\
+    $TOP/include/ALL/8.out.h
 
-YFILES=a.y\
+YFILES=a.y
 
-YFLAGS=-D1 -d
+LIB=../aa/aa.a$O
 
 <$TOP/mkfiles/mkone
 
-lex.$O:	$TOP/compilers/cc/macbody $TOP/compilers/cc/lexbody
+$LIB:
+	cd ../aa
+	mk all
+
+YFLAGS=-D1 -d
+

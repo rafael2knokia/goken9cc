@@ -1,37 +1,33 @@
 TOP=../..
-<$TOP/mkconfig
 <$TOP/mkfiles/$objtype/mkfile
 
 TARG=8l
-LDLIBS=-lbio -l9 -lm
 
-OFILES=\
+OFILES=globals.$O\
+        utils.$O\
 	asm.$O\
-	list.$O\
 	obj.$O\
 	optab.$O\
 	pass.$O\
 	span.$O\
-        \
+	list.$O\
 	enam.$O\
-        elf.$O\
+	compat.$O\
+	elf.$O\
 
-#old: compat.$O or $TARGMODEL.$O
+HFILES=\
+	l.h\
+	elf.h\
+    $TOP/include/ALL/8.out.h
 
-HFILES= l.h 8.out.h  $TOP/include/ar.h
 
+CFLAGS=$CFLAGS -. -I.
 
 <$TOP/mkfiles/mkone
 
-CLEANFILES=enam.c
-enam.c: 8.out.h
-	sh mkenam
+# updated manually for now, because of syncweb
+#$TOP/compilers/8c/enam.c: $TOP/include/ALL/8.out.h
+#	@ { cd ../8c; mk enam.c }
 
-#I added the elf.c/elf.h symlinks instead of reusing
-# ../lk/elf.$O to mimic plan9/ code that has those files
-# only for 8l
-#%.$O:	../lk/%.c
-#	$CC $CFLAGS ../lk/$stem.c
-
-#enam.$O:	../8c/enam.c
-#	$CC $CFLAGS ../8c/enam.c
+enam.$O:	$TOP/compilers/8c/enam.c
+	$CC $CFLAGS $TOP/compilers/8c/enam.c

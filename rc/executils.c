@@ -16,6 +16,7 @@
 /*e: global [[argv0]] */
 
 /*s: function [[start]] */
+/// main | Xrdcmds -> <>
 void
 start(code *c, int pc, var *local)
 {
@@ -55,6 +56,7 @@ pushword(char *wd)
 /*e: function [[pushword]] */
 
 /*s: function [[popword]] */
+/// execexec -> <>
 void
 popword(void)
 {
@@ -75,6 +77,7 @@ popword(void)
 /*e: function [[popword]] */
 
 /*s: function [[pushlist]] */
+/// main | Xmark ->  <>
 void
 pushlist(void)
 {
@@ -151,6 +154,7 @@ Xerror1(char *s)
 
 
 /*s: function [[turfredir]] */
+/// (Xerror | ...) -> Xreturn -> <>
 void
 turfredir(void)
 {
@@ -199,5 +203,4 @@ Xreturn(void)
         Exit(getstatus(), __LOC__);
 }
 /*e: function [[Xreturn]] */
-
 /*e: rc/executils.c */

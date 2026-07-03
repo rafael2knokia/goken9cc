@@ -1,23 +1,37 @@
+/*s: 8l/l.h */
 #include	<u.h>
 #include	<libc.h>
 #include	<bio.h>
-#include	"../8l/8.out.h"
-#include	"../8l/elf.h"
 
-#ifndef	EXTERN
-#define	EXTERN	extern
-#endif
+#include	<common.out.h>
+#include	<8.out.h>
+#include	"elf.h"
 
-#define	P		((Prog*)0)
-#define	S		((Sym*)0)
-#define	TNAME		(curtext?curtext->from.sym->name:noname)
+/*s: macro [[DBG]] */
+#define DBG if(debug['v']) mylog
+/*e: macro [[DBG]] */
 
+/*s: constant [[P]] */
+#define P       ((Prog*)nil)
+/*e: constant [[P]] */
+/*s: constant [[S]] */
+#define S       ((Sym*)nil)
+/*e: constant [[S]] */
+
+/*s: constant [[TNAME]](x86) */
+#define	TNAME		(curtext ? curtext->from.sym->name : noname)
+/*e: constant [[TNAME]](x86) */
+
+/*s: function [[cput]](x86) */
 #define	cput(c)\
-	{ *cbp++ = c;\
-	if(--cbc <= 0)\
-		cflush(); }
+    { *cbp++ = c;\
+    if(--cbc <= 0)\
+        cflush(); }
+/*e: function [[cput]](x86) */
 
-#define	LIBNAMELEN	300
+/*s: constant [[LIBNAMELEN]] */
+#define LIBNAMELEN  300
+/*e: constant [[LIBNAMELEN]] */
 
 typedef	struct	Adr	Adr;
 typedef	struct	Prog	Prog;
@@ -25,186 +39,313 @@ typedef	struct	Sym	Sym;
 typedef	struct	Auto	Auto;
 typedef	struct	Optab	Optab;
 
+/*s: struct [[Adr]](x86) */
 struct	Adr
 {
-	union
-	{
-		long	u0offset;
-		char	u0scon[8];
-		Prog	*u0cond;	/* not used, but should be D_BRANCH */
-		Ieee	u0ieee;
-	} u0;
-	union
-	{
-		Auto*	u1autom;
-		Sym*	u1sym;
-	} u1;
-	short	type;
-	uchar	index;
-	char	scale;
+    //enum<operand_kind> (D_NONE by default)
+    short	type;
+
+    union
+    {
+        long	u0offset;
+        char	u0scon[8];
+        Prog	*u0cond;	/* not used, but should be D_BRANCH */
+        Ieee	u0ieee;
+    } u0;
+
+    union
+    {
+        Auto*	u1autom;
+        Sym*	u1sym;
+    } u1;
+
+    //enum<operand_kind(register-only|D_NONE)>
+    byte	index;
+
+    // TODO: abused for NOPROF function attributes
+    char	scale; // offset * scale give size of entity?
 };
+/*e: struct [[Adr]](x86) */
 
+/*s: constant [[offset]] */
 #define	offset	u0.u0offset
+/*e: constant [[offset]] */
+/*s: constant [[scon]](x86) */
 #define	scon	u0.u0scon
+/*e: constant [[scon]](x86) */
+/*s: constant [[cond]](x86) */
 #define	cond	u0.u0cond
+/*e: constant [[cond]](x86) */
+/*s: constant [[ieee]] */
 #define	ieee	u0.u0ieee
+/*e: constant [[ieee]] */
 
+/*s: constant [[autom]] */
 #define	autom	u1.u1autom
+/*e: constant [[autom]] */
+/*s: constant [[sym]] */
 #define	sym	u1.u1sym
+/*e: constant [[sym]] */
 
+/*s: struct [[Prog]](x86) */
 struct	Prog
 {
-	Adr	from;
-	Adr	to;
-	Prog	*forwd;
-	Prog*	link;
-	Prog*	pcond;	/* work on this */
-	long	pc;
-	long	line;
-	short	as;
-	char	width;		/* fake for DATA */
-	char	ft;		/* oclass cache */
-	char	tt;
-	uchar	mark;	/* work on these */
-	uchar	back;
+    //enum<opcode>
+    short	as;
+
+    // operands
+    Adr	from;
+    Adr	to;
+
+    // [[Prog]] other fields
+    // 2 by default in zprg, why?
+    byte	back;
+
+    Prog*	forwd;
+    long	pc;
+    long	line;
+    char	width;		/* fake for DATA */
+    char	ft;		/* oclass cache */
+    char	tt;
+    byte	mark;	/* work on these */
+
+    // [[Prog]] Extra fields
+
+    // list<ref<Prog>> from firstp/lastp, or datap/edatap
+    Prog*	link;
+
+    // list<ref<Prog>> from textp/etextp, to follow CALL xxx
+    Prog*	pcond;	/* work on this */
+
 };
+/*e: struct [[Prog]](x86) */
+/*s: struct [[Auto]](x86) */
 struct	Auto
 {
-	Sym*	asym;
-	Auto*	link;
-	long	aoffset;
-	short	type;
+    Sym*	asym;
+
+    long	aoffset;
+    short	type;
+
+    // Extra
+    Auto*	link;
 };
-struct	Sym
+/*e: struct [[Auto]](x86) */
+/*s: struct [[Sym]] */
+struct  Sym
 {
-	char	*name;
-	short	type;
-	short	version;
-	short	become;
-	short	frame;
-	uchar	subtype;
-	ushort	file;
-	long	value;
-	long	sig;
-	Sym*	link;
+    // The key
+    // ref_own<string>
+    char    *name;
+    // 0 for global symbols, object file id for private symbols
+    short   version; 
+
+    // The generic value, 
+    // e.g., virtual pc for a TEXT procedure, size for GLOBL
+    long    value; 
+
+    /*s: [[Sym]] section field */
+    //enum<Section>
+    short   type;
+    /*e: [[Sym]] section field */
+
+    /*s: [[Sym]] other fields */
+    // for instance last 32 bits of md5sum of the type of the symbol
+    ulong   sig;
+    /*x: [[Sym]] other fields */
+    // index in filen[]
+    ushort  file;
+    /*x: [[Sym]] other fields */
+    // enum<Section> too?
+    short   subtype;
+    /*x: [[Sym]] other fields */
+    // x86 only, dead? can remove though?
+    short   become;
+    /*x: [[Sym]] other fields */
+    // x86 only
+    short   frame;
+    /*e: [[Sym]] other fields */
+    // Extra
+    /*s: [[Sym]] extra fields */
+    // list<ref<Sym>> (from = hash)
+    Sym*    link;
+    /*e: [[Sym]] extra fields */
 };
+/*e: struct [[Sym]] */
+/*s: struct [[Optab]](x86) */
 struct	Optab
 {
-	short	as;
-	uchar*	ytab;
-	uchar	prefix;
-	uchar	op[10];
+    // enum<as> from 8.out.h
+    short	as;
+
+    byte*	ytab;
+
+    // enum<Pxxx>
+    byte	prefix;
+    // the actual x86 machine code for instruction optab.as
+    byte	op[10];
+};
+/*e: struct [[Optab]](x86) */
+
+/*s: enum [[sxxx]](x86) */
+enum section
+{
+    SNONE		= 0,
+    STEXT		= 1,
+    SDATA,
+    SBSS,
+
+    SDATA1,
+    SXREF, // means not defined (yet)
+    SFILE,
+    SCONST,
+    SUNDEF,
+
+    SIMPORT,
+    SEXPORT,
+};
+/*e: enum [[sxxx]](x86) */
+/*s: enum [[yxxx]](x86) */
+enum yxxx {
+    Yxxx		= 0,
+    Ynone,
+    Yi0,
+    Yi1,
+    Yi8,
+    Yi32,
+
+    Yiauto,
+
+    Yal,
+    Ycl,
+    Yax,
+    Ycx,
+    Yrb,
+    Yrl,
+    Yrf,
+    Yf0,
+    Yrx,
+    Ymb,
+    Yml,
+    Ym,
+    Ybr,
+    Ycol,
+
+    Ycs,	Yss,	Yds,	Yes,	Yfs,	Ygs,
+    Ygdtr,	Yidtr,	Yldtr,	Ymsw,	Ytask,
+    Ycr0,	Ycr1,	Ycr2,	Ycr3,	Ycr4,	Ycr5,	Ycr6,	Ycr7,
+    Ydr0,	Ydr1,	Ydr2,	Ydr3,	Ydr4,	Ydr5,	Ydr6,	Ydr7,
+    Ytr0,	Ytr1,	Ytr2,	Ytr3,	Ytr4,	Ytr5,	Ytr6,	Ytr7,
+
+    Ymax,
+};
+/*e: enum [[yxxx]](x86) */
+/*s: enum [[zxxx]](x86) */
+enum zxxx {
+    Zxxx		= 0,
+
+    Zlit,
+    Z_rp,
+    Zbr,
+    Zcall,
+    Zib_,
+    Zib_rp,
+    Zibo_m,
+    Zil_,
+    Zil_rp,
+    Zilo_m,
+    Zjmp,
+    Zloop,
+    Zm_o,
+    Zm_r,
+    Zaut_r,
+    Zo_m,
+    Zpseudo,
+    Zr_m,
+    Zrp_,
+    Z_ib,
+    Z_il,
+    Zm_ibo,
+    Zm_ilo,
+    Zib_rr,
+    Zil_rr,
+    Zclr,
+    Zbyte,
+    Zmov,
+    Zmax,
+};
+/*e: enum [[zxxx]](x86) */
+/*s: enum [[pxxx]](x86) */
+enum pxxx {
+    Px		= 0,
+    Pe		= 0x66,	/* operand escape */
+    Pm		= 0x0f,	/* 2byte opcode escape */
+    Pq		= 0xff,	/* both escape */
+    Pb		= 0xfe,	/* byte operands */
 };
 
-enum
-{
-	STEXT		= 1,
-	SDATA,
-	SBSS,
-	SDATA1,
-	SXREF,
-	SFILE,
-	SCONST,
-	SUNDEF,
 
-	SIMPORT,
-	SEXPORT,
-
-	NHASH		= 10007,
-	NHUNK		= 100000,
-	MINSIZ		= 4,
-	STRINGSZ	= 200,
-	MINLC		= 1,
-	MAXIO		= 8192,
-	MAXHIST		= 20,				/* limit of path elements for history symbols */
-
-	Yxxx		= 0,
-	Ynone,
-	Yi0,
-	Yi1,
-	Yi8,
-	Yi32,
-	Yiauto,
-	Yal,
-	Ycl,
-	Yax,
-	Ycx,
-	Yrb,
-	Yrl,
-	Yrf,
-	Yf0,
-	Yrx,
-	Ymb,
-	Yml,
-	Ym,
-	Ybr,
-	Ycol,
-
-	Ycs,	Yss,	Yds,	Yes,	Yfs,	Ygs,
-	Ygdtr,	Yidtr,	Yldtr,	Ymsw,	Ytask,
-	Ycr0,	Ycr1,	Ycr2,	Ycr3,	Ycr4,	Ycr5,	Ycr6,	Ycr7,
-	Ydr0,	Ydr1,	Ydr2,	Ydr3,	Ydr4,	Ydr5,	Ydr6,	Ydr7,
-	Ytr0,	Ytr1,	Ytr2,	Ytr3,	Ytr4,	Ytr5,	Ytr6,	Ytr7,
-	Ymax,
-
-	Zxxx		= 0,
-
-	Zlit,
-	Z_rp,
-	Zbr,
-	Zcall,
-	Zib_,
-	Zib_rp,
-	Zibo_m,
-	Zil_,
-	Zil_rp,
-	Zilo_m,
-	Zjmp,
-	Zloop,
-	Zm_o,
-	Zm_r,
-	Zaut_r,
-	Zo_m,
-	Zpseudo,
-	Zr_m,
-	Zrp_,
-	Z_ib,
-	Z_il,
-	Zm_ibo,
-	Zm_ilo,
-	Zib_rr,
-	Zil_rr,
-	Zclr,
-	Zbyte,
-	Zmov,
-	Zmax,
-
-	Px		= 0,
-	Pe		= 0x66,	/* operand escape */
-	Pm		= 0x0f,	/* 2byte opcode escape */
-	Pq		= 0xff,	/* both escape */
-	Pb		= 0xfe,	/* byte operands */
-
-	Roffset	= 22,		/* no. bits for offset in relocation address */
-	Rindex	= 10,		/* no. bits for index in relocation address */
+/*e: enum [[pxxx]](x86) */
+/*s: enum [[rxxx]] */
+enum rxxx {
+    Roffset = 22,       /* no. bits for offset in relocation address */
+    Rindex  = 10,       /* no. bits for index in relocation address */
 };
+/*e: enum [[rxxx]] */
 
-EXTERN union
+/*s: enum [[misc1]](x86) */
+enum misc1 {
+    /*s: constant NHASH linker */
+    NHASH       = 10007,
+    /*e: constant NHASH linker */
+    /*s: constant NHUNK linker */
+    NHUNK       = 100000,
+    /*e: constant NHUNK linker */
+
+    MINSIZ		= 4,
+    /*s: constant [[STRINGSZ]] */
+    STRINGSZ    = 200,
+    /*e: constant [[STRINGSZ]] */
+    MINLC		= 1,
+    /*s: constant [[MAXIO]] */
+    MAXIO       = 8192,
+    /*e: constant [[MAXIO]] */
+    MAXHIST		= 20, /* limit of path elements for history symbols */
+};
+/*e: enum [[misc1]](x86) */
+
+/*s: enum [[headtype]](x86) */
+/*
+ *	-H0 -T0x40004C -D0x10000000	is garbage unix
+ *	-H1 -T0xd0 -R4			is unix coff
+ *	-H2 -T4128 -R4096		is plan9 format
+ *	-H3 -Tx -Rx			is MS-DOS .COM
+ *	-H4 -Tx -Rx			is fake MS-DOS .EXE
+ *	-H5 -T0x80100020 -R4096		is ELF
+ */
+enum headtype {
+    H_GARBAGE = 0,
+    H_COFF = 1,
+    H_PLAN9 = 2, // default
+    H_COM = 3,
+    H_EXE = 4,
+    H_ELF = 5,
+};
+/*e: enum [[headtype]](x86) */
+
+/*s: struct [[Buf]] */
+union Buf
 {
-	struct
-	{
-		char	obuf[MAXIO];			/* output buffer */
-		uchar	ibuf[MAXIO];			/* input buffer */
-	} u;
-    //pad: this does not work under recent gcc versions
-	//old: char	dbuf[1];
-    //pad: see also https://bitbucket.org/inferno-os/inferno-os/pull-requests/21/fixed-compilation-of-9load-for-x86-with/diff#comment-60946786
-} buf;
-
-#define	cbuf	u.obuf
-#define	xbuf	u.ibuf
-//pad: simpler
-#define	dbuf	u.obuf
+    struct
+    {
+        char    obuf[MAXIO];            /* output buffer */
+        byte    ibuf[MAXIO];            /* input buffer */
+    };
+    char    dbuf[1]; // variable size
+    //XxX: this cause bugs in kencc under Linux
+};
+/*e: struct [[Buf]] */
+extern union Buf buf;
 
 #pragma	varargck	type	"A"	int
 #pragma	varargck	type	"A"	uint
@@ -216,153 +357,128 @@ EXTERN union
 
 #pragma	varargck	argpos	diag 1
 
-EXTERN	long	HEADR;
-EXTERN	long	HEADTYPE;
-EXTERN	long	INITDAT;
-EXTERN	long	INITRND;
-EXTERN	long	INITTEXT;
-EXTERN	long	INITTEXTP;
-EXTERN	char*	INITENTRY;		/* entry point */
-EXTERN	Biobuf	bso;
-EXTERN	long	bsssize;
-EXTERN	long	casepc;
-EXTERN	int	cbc;
-EXTERN	char*	cbp;
-EXTERN	char*	pcstr;
-EXTERN	int	cout;
-EXTERN	Auto*	curauto;
-EXTERN	Auto*	curhist;
-EXTERN	Prog*	curp;
-EXTERN	Prog*	curtext;
-EXTERN	Prog*	datap;
-EXTERN	Prog*	edatap;
-EXTERN	long	datsize;
-EXTERN	char	debug[128];
-EXTERN	char	literal[32];
-EXTERN	Prog*	etextp;
-EXTERN	Prog*	firstp;
-EXTERN	char	fnuxi8[8];
-EXTERN	char	fnuxi4[4];
-EXTERN	Sym*	hash[NHASH];
-EXTERN	Sym*	histfrog[MAXHIST];
-EXTERN	int	histfrogp;
-EXTERN	int	histgen;
-EXTERN	char*	library[50];
-EXTERN	char*	libraryobj[50];
-EXTERN	int	libraryp;
-EXTERN	int	xrefresolv;
-EXTERN	char*	hunk;
-EXTERN	char	inuxi1[1];
-EXTERN	char	inuxi2[2];
-EXTERN	char	inuxi4[4];
-EXTERN	char	ycover[Ymax*Ymax];
-EXTERN	uchar*	andptr;
-EXTERN	uchar	and[30];
-EXTERN	char	reg[D_NONE];
-EXTERN	Prog*	lastp;
-EXTERN	long	lcsize;
-EXTERN	int	nerrors;
-EXTERN	long	nhunk;
-EXTERN	long	nsymbol;
-EXTERN	char*	noname;
-EXTERN	char*	outfile;
-EXTERN	long	pc;
-EXTERN	long	spsize;
-EXTERN	Sym*	symlist;
-EXTERN	long	symsize;
-EXTERN	Prog*	textp;
-EXTERN	long	textsize;
-EXTERN	long	thunk;
-EXTERN	int	version;
-EXTERN	Prog	zprg;
-EXTERN	int	dtype;
+extern	long	HEADR;
+extern	short	HEADTYPE;
+extern	long	INITDAT;
+extern	long	INITRND;
+extern	long	INITTEXT;
+extern	long	INITTEXTP;
+extern	char*	INITENTRY;		/* entry point */
 
-EXTERN	Adr*	reloca;
-EXTERN	int	doexp, dlm;
-EXTERN	int	imports, nimports;
-EXTERN	int	exports, nexports, allexport;
-EXTERN	char*	EXPTAB;
-EXTERN	Prog	undefp;
+extern	Biobuf	bso;
+extern	long	bsssize;
+extern	int	cbc;
+extern	char*	cbp;
+extern	char*	pcstr;
+extern	int	cout;
+extern	Prog*	curp;
+extern	Prog*	curtext;
+extern	Prog*	datap;
+extern	Prog*	edatap;
+extern	long	datsize;
+extern	bool	debug[128];
+extern	Prog*	firstp;
+extern	char	fnuxi8[8];
+extern	char	fnuxi4[4];
+extern	Sym*	hash[NHASH];
+extern	char*	hunk;
+extern	char	inuxi1[1];
+extern	char	inuxi2[2];
+extern	char	inuxi4[4];
+extern	char	ycover[Ymax*Ymax];
+extern	uchar*	andptr;
+extern	uchar	and[30];
+extern	char	reg[D_NONE];
+extern	Prog*	lastp;
+extern	long	lcsize;
+extern	int	nerrors;
+extern	long	nhunk;
+extern	long	nsymbol;
+//@Scheck: used by TName, not useless
+extern	char*	noname;
+extern	char*	outfile;
+extern	long	pc;
+extern	long	symsize;
+extern	Prog*	textp;
+extern	long	textsize;
+extern	long	thunk;
+extern	Prog	zprg;
+extern	int	dtype;
 
-#define	UP	(&undefp)
+extern	Adr*	reloca;
+extern	bool	dlm;
+extern	int	imports, nimports;
+extern	int	exports, nexports;
+bool allexport;
+extern	char*	EXPTAB;
+extern	Prog	undefp;
+
+/*s: constant [[UP]] */
+#define UP  (&undefp)
+/*e: constant [[UP]] */
 
 extern	Optab	optab[];
+//@Scheck: defined in ../8c/enam.c
 extern	char*	anames[];
 
-int	Aconv(Fmt*);
-int	Dconv(Fmt*);
-int	Pconv(Fmt*);
-int	Rconv(Fmt*);
-int	Sconv(Fmt*);
-void	addhist(long, int);
-void	addlibpath(char*);
+
 Prog*	appendp(Prog*);
 void	asmb(void);
 void	asmdyn(void);
 void	asmins(Prog*);
 void	asmlc(void);
-void	asmsp(void);
+
 void	asmsym(void);
 long	atolwhex(char*);
-Prog*	brchain(Prog*);
-Prog*	brloop(Prog*);
+
 void	cflush(void);
 void	ckoff(Sym*, long);
 Prog*	copyp(Prog*);
-double	cputime(void);
-void	datblk(long, long);
+
+double	cputime(void); //?
+
+
 void	diag(char*, ...);
 void	dodata(void);
 void	doinit(void);
-void	doprof1(void);
-void	doprof2(void);
 void	dostkoff(void);
 void	dynreloc(Sym*, ulong, int);
-long	entryvalue(void);
+
 void	errorexit(void);
 void	export(void);
-int	find1(long, int);
-int	find2(long, int);
-char*	findlib(char*);
+int	fileexists(char*);
+
+
 void	follow(void);
 void	gethunk(void);
-void	histtoauto(void);
-double	ieeedtod(Ieee*);
 long	ieeedtof(Ieee*);
 void	import(void);
-void	ldobj(int, long, char*);
-void	loadlib(void);
+
 void	listinit(void);
 Sym*	lookup(char*, int);
-void	lput(int32);
-void	lputl(int32);
-void	llput(vlong v);
-void	llputl(vlong v);
+void	lput(long);
+void	lputl(long);
 void	main(int, char*[]);
-void	mkfwd(void);
-void*	mysbrk(ulong);
-void	nuxiinit(void);
-void	objfile(char*);
-int	opsize(Prog*);
+
 void	patch(void);
 Prog*	prg(void);
-void	readundefs(char*, int);
-int	relinv(int);
-long	reuse(Prog*, Sym*);
+
+
 long	rnd(long, long);
 void	span(void);
 void	strnput(char*, int);
 void	undef(void);
 void	undefsym(Sym*);
-long	vaddr(Adr*);
-void	wput(int32);
-void	wputl(int32);
+
+void	wput(long);
+void	wputl(long);
 void	xdefine(char*, int, long);
-void	xfol(Prog*);
-int	zaddr(uchar*, Adr*, Sym*[]);
-void	zerosig(char*);
+
+void mylog(char*, ...);
+
 
 #pragma	varargck	type	"D"	Adr*
 #pragma	varargck	type	"P"	Prog*
 #pragma	varargck	type	"R"	int
 #pragma	varargck	type	"A"	int
+/*e: 8l/l.h */

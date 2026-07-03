@@ -17,6 +17,7 @@ int nreps = 1;
 /*e: global [[nreps]] */
 
 /*s: function [[graph]] */
+/// main -> mk -> <>
 Node*
 graph(char *target)
 {
@@ -58,7 +59,7 @@ static Node*
 applyrules(char *target, char *cnt)
 {
     Node *node;
-    // list<ref<Arc> (next = Arc.next, last = lasta)
+    // list<ref<Arc> (next = Arc.next, last = lasta, head elt to skip)
     Arc head;
     // ref<Arc>
     Arc *lasta = &head;
@@ -175,7 +176,7 @@ applyrules(char *target, char *cnt)
                     for(pre = r->prereqs; pre; pre = pre->next) {
                         /*s: [[applyrules()]] if regexp rule, adjust buf and rmatch */
                         if(r->attr&REGEXP)
-                            regsub(pre->s, buf, /*sizeof(buf),*/ rmatch, NREGEXP);
+                            regsub(pre->s, buf, sizeof(buf), rmatch, NREGEXP);
                         /*e: [[applyrules()]] if regexp rule, adjust buf and rmatch */
                         else
                             subst(stem, pre->s, buf, sizeof(buf));
@@ -200,6 +201,7 @@ applyrules(char *target, char *cnt)
 /*e: function [[applyrules]] */
 
 /*s: function [[nrep]] */
+/// mk -> nrep
 void
 nrep(void)
 {
@@ -280,6 +282,7 @@ vacuous(Node *node)
 /*e: function [[vacuous]] */
 
 /*s: constructor [[newnode]] */
+/// main -> mk -> graph -> applyrules -> <>
 static Node*
 newnode(char *name)
 {
@@ -313,6 +316,7 @@ newnode(char *name)
 extern void rcopy(char **to, Resub *match, int n);
 
 /*s: constructor [[newarc]] */
+/// main -> mk -> graph -> applyrules -> <>
 Arc*
 newarc(Node *n, Rule *r, char *stem, Resub *match)
 {

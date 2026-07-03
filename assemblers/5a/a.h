@@ -1,175 +1,70 @@
-#include <u.h>
-#include <libc.h>
-#include <bio.h>
-#include "../../linkers/5l/5.out.h"
+/*s: 5a/a.h */
+#include "../as/aa.h"
+#include <5.out.h>
 
-#ifndef	EXTERN
-#define	EXTERN	extern
-#endif
+//----------------------------------------------------------------------------
+// Data structures and constants
+//----------------------------------------------------------------------------
 
-typedef	struct	Sym	Sym;
-typedef	struct	Gen	Gen;
-typedef	struct	Io	Io;
-typedef	struct	Hist	Hist;
+/*s: constant [[FPCHIP]](arm) */
+#define FPCHIP      true
+/*e: constant [[FPCHIP]](arm) */
 
-#define	MAXALIGN	7
-#define	FPCHIP		1
-#define	NSYMB		8192
-#define	BUFSIZ		8192
-#define	HISTSZ		20
-#define	NINCLUDE	10
-#define	NHUNK		10000
-#define	EOF		(-1)
-#define	IGN		(-2)
-#define	GETC()		((--fi.c < 0)? filbuf(): *fi.p++ & 0xff)
-#define	NHASH		503
-#define	STRINGSZ	200
-#define	NMACRO		10
+/*s: constant [[Always]](arm) */
+#define    Always 14
+/*e: constant [[Always]](arm) */
 
-struct	Sym
+/*s: struct [[Gen]](arm) */
+struct  Gen
 {
-	Sym*	link;
-	char*	macro;
-	long	value;
-	ushort	type;
-	char	*name;
-	char	sym;
+    // enum<Operand_kind>
+    short   type;
+
+    // switch on Gen.type
+    union {
+        long    offset; // offset or lval or ...
+        double  dval;
+        char    sval[NSNAME];
+    };
+    // option<enum<Register>> (None = R_NONE)
+    short   reg; // abused also to store a size for DATA
+
+    /*s: [[Gen]] other fields */
+    // option<ref<Sym>> (owner = hash)
+    Sym*    sym;
+    /*x: [[Gen]] other fields */
+    // option<enum<Sym_kind>> (None = N_NONE)
+    short   symkind;
+    /*e: [[Gen]] other fields */
 };
-#define	S	((Sym*)0)
+/*e: struct [[Gen]](arm) */
+typedef struct  Gen Gen;
 
-EXTERN	struct
-{
-	char*	p;
-	int	c;
-} fi;
+//----------------------------------------------------------------------------
+// Globals
+//----------------------------------------------------------------------------
 
-struct	Io
-{
-	Io*	link;
-	char	b[BUFSIZ];
-	char*	p;
-	short	c;
-	short	f;
-};
-#define	I	((Io*)0)
+// globals.c
+extern  Gen nullgen;
 
-EXTERN	struct
-{
-	Sym*	sym;
-	short	type;
-} h[NSYM];
+//----------------------------------------------------------------------------
+// Functions
+//----------------------------------------------------------------------------
 
-struct	Gen
-{
-	Sym*	sym;
-	long	offset;
-	short	type;
-	short	reg;
-	short	name;
-	double	dval;
-	char	sval[8];
-};
+// lex.c (for y.tab.c, main.c)
+/*s: signature [[yylex]] */
+// unit -> (enum<token_code> | -1 (EOF) | char)
+long    yylex(void);
+/*e: signature [[yylex]] */
+void    cinit(void);
 
-struct	Hist
-{
-	Hist*	link;
-	char*	name;
-	long	line;
-	long	offset;
-};
-#define	H	((Hist*)0)
+// y.tab.c from a.y (for main.c)
+int yyparse(void);
 
-enum
-{
-	CLAST,
-	CMACARG,
-	CMACRO,
-	CPREPROC,
+// obj.c (for main.c)
+/*s: signature [[outcode]](arm) */
+void    outcode(int opcode, int cond, Gen* opd1, int reg, Gen* opd3);
+/*e: signature [[outcode]](arm) */
+void    outhist(void);
 
-	Always	= 14,
-};
-
-EXTERN	char	debug[256];
-EXTERN	Sym*	hash[NHASH];
-EXTERN	char*	Dlist[30];
-EXTERN	int	nDlist;
-EXTERN	Hist*	ehist;
-EXTERN	int	newflag;
-EXTERN	Hist*	hist;
-EXTERN	char*	hunk;
-EXTERN	char*	include[NINCLUDE];
-EXTERN	Io*	iofree;
-EXTERN	Io*	ionext;
-EXTERN	Io*	iostack;
-EXTERN	long	lineno;
-EXTERN	int	nerrors;
-EXTERN	long	nhunk;
-EXTERN	int	ninclude;
-EXTERN	Gen	nullgen;
-EXTERN	char*	outfile;
-EXTERN	int	pass;
-EXTERN	char*	pathname;
-EXTERN	long	pc;
-EXTERN	int	peekc;
-EXTERN	int	sym;
-EXTERN	char	symb[NSYMB];
-EXTERN	int	thechar;
-EXTERN	char*	thestring;
-EXTERN	long	thunk;
-EXTERN	Biobuf	obuf;
-
-void*	alloc(long);
-void*	allocn(void*, long, long);
-void	errorexit(void);
-void	pushio(void);
-void	newio(void);
-void	newfile(char*, int);
-Sym*	slookup(char*);
-Sym*	lookup(void);
-void	syminit(Sym*);
-int	yylex(void);
-int	getc(void);
-int	getnsc(void);
-void	unget(int);
-int	escchar(int);
-void	cinit(void);
-void	pinit(char*);
-void	cclean(void);
-int	isreg(Gen*);
-void	outcode(int, int, Gen*, int, Gen*);
-void	zname(char*, int, int);
-void	zaddr(Gen*, int);
-void	ieeedtod(Ieee*, double);
-int	filbuf(void);
-Sym*	getsym(void);
-void	domacro(void);
-void	macund(void);
-void	macdef(void);
-void	macexpand(Sym*, char*);
-void	macinc(void);
-void	maclin(void);
-void	macprag(void);
-void	macif(int);
-void	macend(void);
-void	outhist(void);
-void	dodefine(char*);
-void	prfile(long);
-void	linehist(char*, int);
-void	gethunk(void);
-void	yyerror(char*, ...);
-int	yyparse(void);
-void	setinclude(char*);
-int	assemble(char*);
-
-/*
- *	system-dependent stuff from ../cc/compat.c
- */
-enum				/* keep in synch with ../cc/cc.h */
-{
-	Plan9	= 1<<0,
-	Unix	= 1<<1,
-	Windows	= 1<<2,
-};
-int	systemtype(int);
-int	pathchar(void);
-
+/*e: 5a/a.h */
