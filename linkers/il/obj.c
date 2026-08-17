@@ -1,7 +1,7 @@
 #define	EXTERN
 #include	"l.h"
 
-#include	<ar.h>
+#include	<obj/ar.h>
 
 char	*noname		= "<none>";
 char	symname[]	= SYMDEF;
@@ -56,6 +56,11 @@ main(int argc, char *argv[])
 		a = ARGF();
 		if(a)
 			INITENTRY = a;
+		break;
+	case 'L':
+		a = ARGF();
+		if(a)
+			addlibpath(a);
 		break;
 	case 'T':
 		a = ARGF();
@@ -121,7 +126,10 @@ main(int argc, char *argv[])
 		break;
  	case 7:	/* elf executable */
         // similar to 5l_ code
-		HEADR = rnd(Ehdr32sz+3*Phdr32sz, 16);
+		if(thechar == 'j')
+			HEADR = rnd(Ehdr64sz+3*Phdr64sz, 16);
+		else
+			HEADR = rnd(Ehdr32sz+3*Phdr32sz, 16);
 		//alt: HEADR = rnd(52L+3*32L, 16);
 		if(INITTEXT == -1)
 			INITTEXT = 0x10000 + HEADR;
@@ -256,6 +264,8 @@ errorexit(void)
 	exits(0);
 }
 
+static char*	findlib(char*);	// claude: defined later in this file; forward decl needed by objfile()'s new -L handling below
+
 void
 objfile(char *file)
 {
@@ -267,13 +277,19 @@ objfile(char *file)
 	struct ar_hdr arhdr;
 	char *e, *start, *stop;
 
+	// claude: was resolving -lXXX straight to a hardcoded
+	// /usr/$Xlib/libXXX.a (or /$plan9/lib/libXXX.a under -9), ignoring
+	// -L entirely -- same bug as linkers/vl/obj.c had (see
+	// docs/claude_notes/notes_shared_frontend_bugs.txt), same fix:
+	// use findlib() to search libdir[] (the -L list) instead.
 	if(file[0] == '-' && file[1] == 'l') {
-		if(debug['9'])
-			sprint(name, "/%s/lib/lib", thestring);
-		else
-			sprint(name, "/usr/%clib/lib", thechar);
-		strcat(name, file+2);
-		strcat(name, ".a");
+		snprint(pname, sizeof(pname), "lib%s.a", file+2);
+		e = findlib(pname);
+		if(e == nil) {
+			diag("cannot find library: %s", file);
+			errorexit();
+		}
+		snprint(name, sizeof(name), "%s/%s", e, pname);
 		file = name;
 	}
 	if(debug['v'])
@@ -483,15 +499,54 @@ zaddr(uchar *p, Adr *a, Sym *h[])
 	return c;
 }
 
+/* claude: -L search path, ported from the go-era 7l linker (pobj.c). The
+ * #pragma lib autolibs (e.g. "libmini.a") arrive here without a / or .
+ * prefix; instead of the old hardcoded /usr/ilib default, look for them in
+ * each -L directory so `il -L. ...` finds ./libmini.a like 7l does. */
+void
+addlibpath(char *arg)
+{
+	static int maxlibdir = 0;
+	char **p;
+
+	if(nlibdir >= maxlibdir) {
+		maxlibdir = maxlibdir ? maxlibdir*2 : 8;
+		p = malloc(maxlibdir*sizeof(*p));
+		if(p == nil) {
+			diag("out of memory");
+			errorexit();
+		}
+		memmove(p, libdir, nlibdir*sizeof(*p));
+		free(libdir);
+		libdir = p;
+	}
+	libdir[nlibdir++] = strdup(arg);
+}
+
+static char*
+findlib(char *file)
+{
+	int i;
+	char name[1024];
+
+	for(i = 0; i < nlibdir; i++) {
+		snprint(name, sizeof(name), "%s/%s", libdir[i], file);
+		if(access(name, 0) >= 0)
+			return libdir[i];
+	}
+	return nil;
+}
+
 void
 addlib(char *obj)
 {
 	char name[1024], comp[256], *p;
-	int i;
+	int i, search;
 
 	if(histfrogp <= 0)
 		return;
 
+	search = 0;
 	if(histfrog[0]->name[1] == '/') {
 		sprint(name, "");
 		i = 1;
@@ -500,11 +555,10 @@ addlib(char *obj)
 		sprint(name, ".");
 		i = 0;
 	} else {
-		if(debug['9'])
-			sprint(name, "/%s/lib", thestring);
-		else
-			sprint(name, "/usr/%clib", thechar);
+		/* claude: build a bare name and search the -L dirs below */
+		sprint(name, "");
 		i = 0;
+		search = 1;
 	}
 
 	for(; i<histfrogp; i++) {
@@ -531,8 +585,19 @@ addlib(char *obj)
 			diag("library component too long");
 			return;
 		}
-		strcat(name, "/");
+		/* claude: no leading '/' when searching (name starts empty) */
+		if(i > 0 || !search)
+			strcat(name, "/");
 		strcat(name, comp);
+	}
+	/* claude: resolve the bare autolib name against the -L dirs */
+	if(search) {
+		p = findlib(name);
+		if(p != nil) {
+			char full[1024];
+			snprint(full, sizeof(full), "%s/%s", p, name);
+			strcpy(name, full);
+		}
 	}
 	for(i=0; i<libraryp; i++)
 		if(strcmp(name, library[i]) == 0)
@@ -664,7 +729,6 @@ ldobj(int f, int32 c, char *pn)
 	static int files;
 	static char **filen;
 	char **nfilen;
-    int hlen;
 
 	if((files&15) == 0){
 		nfilen = malloc((files+16)*sizeof(char*));
@@ -677,11 +741,6 @@ ldobj(int f, int32 c, char *pn)
 	bsize = buf.xbuf;
 	bloc = buf.xbuf;
 	di = S;
-
-    //coupling: ia/lex.c and and ic/swt.c
-    hlen = strlen("riscv\n\n!\n");
-    seek(f, hlen, SEEK__CUR);
-    c-=hlen;
 
 newloop:
 	memset(h, 0, sizeof(h));
@@ -822,6 +881,25 @@ loop:
 		case ASRLW:	o = ASRL; break;
 		case ASRAW:	o = ASRA; break;
 		case AMULW:	o = AMUL; break;
+		}
+		p->as = o;
+	} else if(thechar == 'j') {
+		switch(o) {
+		case AMOVW:
+		case AMOVWU:
+			/* mirror of the AMOVW/AMOVWU case above for thechar=='i':
+			 * with no memory operand there is no 32-bit truncation/
+			 * extension to preserve (the value is just moved into a
+			 * register), so treat it as a full-width move. Otherwise
+			 * these hit optab.c's AMOVW/C_LECON case 9, which -- unlike
+			 * AMOV's C_LECON case 20 -- never adds instoffx (INITDAT)
+			 * and never emits the auipc-relative form thechar=='j'
+			 * needs, so any "MOVW $sym(SB), R" (e.g. the compiler's
+			 * setSB-style static-base setup) resolves to a near-zero
+			 * bogus address instead of the symbol's real one. */
+			if(p->from.type != D_OREG && p->to.type != D_OREG)
+				o = AMOV;
+			break;
 		}
 		p->as = o;
 	}

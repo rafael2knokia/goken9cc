@@ -1,15 +1,335 @@
 # -*- org -*-
 
-* 0.4 (Q3 2026) (??)
+* 0.4 (Q3 2026) ([58][alc] synced/fixed with principia, 6l/7l macOS Mach-O, 6l/8l windows PE, start kenccs unification, wasm ea/ec/el, multiplatform libc, bootstrapped)
 
 ** toolchain
-- import 5a/5l 8a/8l from principia (and rename the existing 5a/5l/5c 8a/8l/8c
-  that were coming from my kencc to 5ak/5lk/5ck and 8ak/8lk/8ck)
+- import 5a/5c/5l and 8a/8c/8l from principia (and rename the 5a/5l/5c
+  and 8a/8l/8c that were coming from my kencc to 5ak/5lk/5ck and 8ak/8lk/8ck) and
+  fix the many regressions/mismatch between the principia and kencc variants
+  for both the 386 and arm toolchains (was long, mostly fixing errors in
+  principia variant due to old literate programming errors).
+  see pad.org regression/mismatch section (big thx to Claude)
+- ar: add D flag like in GNU ar for "deterministic" builds (was
+  hardcoded before with some //PAD: commented code for reproducible builds),
+  which helped for the principia corpus arm and 386 mismatch detection
+- import 6a/6c/6l from https://github.com/plan9foundation/plan9.git as new
+  starting point for amd64 (and rename the go-era binaries variant to 6ag/6cg/6lg)
+  and add all the good stuff from the go-era and recent improvements
+- 7a/7c/7l Linux
+  * fix the tests/c/vlong/ and tests/c/float/ tests for arm64; adjust to
+    correct calling convention (start at FP+0 not FP+8 because return address
+    not saved in stack but in the link register LR)
+- 7a/7c/7l macOS
+  produce macOS arm64 Mach-O executables with -H6 (big thx to Claude)
+  * 7l: add linkers/lk/macho.c, adapted from the old Go-era src/cmd/ld/macho.c
+    of 6l. Modern arm64 macOS requires signed, dynamic (dyld + LC_MAIN), 
+    PIE (Position Independent Executable, similar to PIC) executables, so 7l
+    also generates
+    pc-relative ADRP/ADD pairs for MOV $sym(SB) and the mkfile runs codesign;
+    see docs/claude_notes/notes_exec_macho.txt and tests/s/mini/hello_macos_arm64.s
+  * 7l -H6: dyld rebase info (LC_DYLD_INFO_ONLY) for pointers stored in
+    initialized data, so C globals like 'static char *dig = "0123...";'
+    survive the ASLR slide of PIE executables (see the enlarged ASLR
+    explanations in docs/claude_notes/notes_exec_macho.txt)
+  * 7c-compiled programs run natively on macOS arm64 too (7c itself needed
+    no change): see helloc_macos_arm64.exe in tests/c/mini, with Darwin
+    syscall stubs and a MOVW fix in xwrite_arm64.s (a 64-bit load of a
+    32-bit int argument that only worked on Linux because the stack
+    happened to be zero there)
+  * 7c: fix two long-standing 7c code generation bugs, found by running
+    tests/c/mini2, vlong and float natively on macOS arm64 (all three now
+    work there, and should now work on Linux arm64 too):
+    - 7c/sgen.c gtext() overwrote the frame size with 0, so stack locals
+      overlapped the outgoing-argument area and were corrupted by any
+      call with 3+ arguments (the old "arm64 segfault" TODOs of mini2)
+    - cc/pgen.c used typechlp instead of the per-compiler typeword table
+      (like 9front does) to decide whether to spill the first argument
+      register to the stack, so a vlong first argument was passed in R0
+      by the caller but never spilled by the callee (no-op for 5c/6c/8c
+      which all have REGARG = -1)
+    - runtime regression test with minimal repros: tests/c/mini2/regress7c.c
+- 6l macOS
+  modernise the amd64 -H6 (macOS Mach-O) output, mirror of the 7l arm64 work:
+  * LC_MAIN entry point (not LC_UNIXTHREAD), MH_DYLDLINK|MH_TWOLEVEL|
+    MH_PIE, libSystem LC_LOAD_DYLIB, and LC_DYLD_INFO_ONLY/BUILD_VERSION/
+    UUID -- dyld now loads the binary instead of the kernel doing a
+    static exec.
+  * PIE / RIP-relative addressing: MOV $sym(SB) is encoded [rip+disp32]
+    with a D_PCREL reloc under -H6; ELF (-H7) and Plan 9 (-H2) keep the
+    absolute SIB encoding (Linux output byte-identical).
+    (Terminology: PIC, position-independent code, is the general technique
+    -- refer to symbols pc-relatively / through a GOT so the code works at
+    any load address, originally for shared libraries mapped at a different
+    address in every process.  PIE, a position-independent *executable*, is
+    that same technique applied to a main program so the kernel can load it
+    at a random base for ASLR.  Our -H6 output is a self-contained PIE: it
+    uses direct RIP-relative refs for its own symbols -- no GOT -- plus the
+    dyld rebase below for absolute pointers in data, and a GOT/bind only for
+    the optional -I libSystem imports.)
+  * dyld rebase (LC_DYLD_INFO_ONLY rebase_off/size, src/cmd/ld/macho.c
+    machorebase()): the ASLR slide is added by dyld to every __DATA slot
+    holding a link-time-absolute pointer -- each D_ADDR reloc on a data
+    symbol, e.g. a C global "static char *dig = \"0123...\";".  Such a
+    pointer lives in writable data and can not be made pc-relative like a
+    code reference.  Ports 7l's linkers/lk/macho.c machorebase() to 6l's
+    Reloc data model.  (Symptom before: reads through such a pointer -- the
+    %x/%d formatting in tests/c/mini2 -- faulted under a nonzero slide but
+    "worked" under lldb, which forces slide 0.)
+  * 6c -z (position-independent code) for the parts the -H6 linker
+    encoding can not fix on its own, since an x86 [rip+disp] operand can
+    not also carry an index register:
+    - src/cmd/6c/cgen.c hardconst(): stop folding "$sym(SB)" (addable==13)
+      into an arithmetic-instruction immediate; load it into a register
+      (-> RIP-relative LEA) instead.  Fixes "(char*)buf + i" which used to
+      compile to "ADDQ $buf(SB), AX".
+    - src/cmd/6c/txt.c doindex()/naddr(): the base of an indexed global,
+      "sym(SB)(index)", is materialized into a register first, giving
+      "MOVQ $sym(SB),R; op (R)(index)" (fixes global buf[i] loads/stores).
+    Gated on -z (companion of 6l -H6); non-PIE builds are byte-identical.
+    tests/c/mini2 now runs natively on macOS amd64 (helloprintf + regress7c).
+  * "6l -I got:remote:lib": declare a Mach-O dynamic import.  The
+    program defines an 8-byte GOT slot in __DATA and calls through it;
+    the linker emits an LC_DYLD_INFO non-lazy bind so dyld resolves
+    remote@lib into that slot at load.  Enables calling libSystem
+    functions (which darling can translate on Linux) instead of raw
+    amd64 Darwin syscalls (which darling can't).
+  * default INITTEXT for -H6 raised from 4096+HEADR to 0x100000+HEADR
+    (clears Linux mmap_min_addr; stays < 2GB for the 32-bit-absolute
+    addressing).  __PAGEZERO is 1MB rather than Apple's 4GB because
+    6l's text layout uses int32 offsets -- MH_PIE lets dyld slide the
+    image regardless.
+  * tests/s/mini/hello_macos_libc_amd64.s calls libSystem's _write via
+    the GOT slot and runs under darling.
+  * see docs/claude_notes/notes_exec_macho.txt for the full story and darling recipe.
+- 6l/8l: support windows PE with -H10, thx to rafael2knokia (and Claude probably),
+  adapting again the Go-era lk/pe.c
+- 8l/8lk: fix a real ELF-writer bug found via tests/c/vlong and
+  tests/c/float: asmb()'s H_ELF case seeked to the symbol table using the
+  unrounded HEADR+textsize+datsize, but the .data section before it was
+  actually written at the page-rounded offset, so the seek landed short
+  and the symbol table clobbered the tail of .data. Fixed in both
+  linkers/8l/asm.c and linkers/8lk/asm.c (kept in sync per tests/s/variants)
+  and regenerated the 386 -S goldens; principia's own x86 builds never hit
+  this since they link as -H2, not ELF (thx to Claude)
+- lib_toolchain/libmach: fixed a duplicate mmips definition (executable.c
+  shadowed v.c's real Mach struct with an all-zero stub), which left
+  mach->pgsize == 0 and crashed vi with SIGFPE on amd64 CI (silently
+  wrong on arm64 instead); also fixed the vi smoke test's now-stale
+  txtaddr expectation after the pgsize fix
+- va/vc/vl: start big unification with 9front: ported LL/SC/SYNC
+  atomics, vl load-hoisting scheduler fix, va long-filename buffer
+  overflow fix, vc growable regopt() regions, vc ".ret" register
+  tracking, vc comma-expression indirect call fix, vc Aaut3 stack
+  alignment fix; see plan9front.txt for details
+- va/vc/vl: also reverted the go-era src/cmd adaptations back to the
+  plan9-era cck/compat abstraction and dropped a custom ar text-header
+  hack, switching mips to AR_=iar (matching 6a); needed porting mips
+  (.v) object support (vobj.c) into lib_toolchain/libmach so iar/acid/vi
+  could recognize .v objects again
+- 7a/7c/7l: start big unification with 9front: ported the
+  vlong/pointer-conversion fix, gmove() same-address guard fix,
+  struct-copy trailing-byte fix, growable regopt() regions, ".ret"
+  register tracking, LDAR/LDXR/STLR/STXR/STLXR atomics rework, and
+  va's long-filename buffer overflow fix; see plan9front.txt for details
+- 7a/7c/7l: also reverted go-era src/cmd adaptations, switching arm64
+  to AR_=iar (same treatment as va/vc/vl); applied 9front's D_XPOST
+  addressing-mode fix in a.y along the way, and ported arm64 (.7)
+  object support into lib_toolchain/libmach, fixing an obj[] OOB bug
+- ia/ic/il: bring up riscv64 ('j') for real (ja/jc/jl were installed
+  as commented-out TODOs before, not working stubs): fixed an ELF
+  header-size miscalculation in il that crashed every -j-linked
+  binary on startup, a setSB/symbol-address bug that resolved every
+  SB-relative load to a near-zero pointer, and a stale-pointer-width
+  bug in ic's own dual-width ginit() (cinit() builds the canonical
+  pointer type before ic gets a chance to set ewidth[TIND]=8 for 'j',
+  so it stayed baked in at the 32-bit default and threw off stack-
+  argument layout). riscv64 now has real qemu-verified coverage in
+  tests/s/{exit,mini} and tests/c/mini2, same as the other archs
+- ia/ic/il: start big unification, this time with miller-riscv (9front
+  has no riscv port; miller-riscv is a maintained continuation of the
+  same dual 32-/64-bit lineage goken already uses): ported the fix for
+  SRAIW silently executing as SRLIW (discarding the sign of "x >>= n"
+  on signed ints); also fixed a float-constant stack overread (fnuxi8[]
+  byte-order table indexed out of range) found via cross-arch
+  consistency and shared with, and also fixed in, vl. See plan9front.txt
+  for details and todo.org for the remaining candidates (a boolgen()/
+  comrel() NaN-comparison bug that turned out deeper than expected, an
+  absolute-address-fed-to-auipc bug in the linker's long-jump case,
+  and the register-range widening also pending for 7a/7c/7l)
+- add an experimental wasm (WebAssembly) toolchain skeleton: ea/el
+  (new arch letter 'e') (all Claude work with little guidance)
+  * include/e.out.h: new opcode/operand-kind header, modeled on
+    5.out.h/8.out.h and on v.out.h/i.out.h's combined D_* enum;
+    locals/globals stand in for a register file (wasm has none), and
+    branch targets are structured-control label depths instead of
+    PC-relative displacements, but no MOVW, does not really work for wasm
+  * assemblers/ea: built on the shared assemblers/as/aa.a library
+    like 5a/8a (not the older self-contained ia/va style); a.y
+    tracks block/loop/if nesting itself to resolve BR/BRIF targets
+    to depths (the one part with no equivalent on any other arch);
+  * linkers/el: table-driven (Optab/oplook(), like every other arch)
+    linker emitting a real .wasm binary (type/import/function/
+    memory/global/export/code/data sections); -I symbol=module.field
+    wires an undefined CALL target to a wasm import, playing the
+    same role -I plays for 6lg's Mach-O dynamic imports
+  * tests/s/mini/hello_wasm.s: a real WASI (wasi_snapshot_preview1.
+    fd_write) hello world, run under Node's WASI implementation via
+    the new scripts/wasm-runner (the wasm counterpart of
+    scripts/qemu-runner); verified byte-identical to hello.expected.txt
+- 5i/vi: fix hello_plan9_arm.exe/hello_plan9_mips.exe not actually
+  running under the emulators (thx to Claude)
+  * 5i: bool is uint8 (see u.h), and "x & (1<<N)" for N>=8 truncates to
+    0 when narrowed into it (unlike a real _Bool's "nonzero->1"); this
+    silently zeroed prebit/ubit/bbit/wbit/lbit in Iswap/Imem1/Imem2,
+    turning the ARM "LDR $hello(SB), R1" PC-relative literal load into
+    a store that clobbered the following code. Retyped those locals to
+    plain int
+  * lib_toolchain/libmach/v.c: mmips.pgsize was 0x1000 but
+    linkers/vl rounds MIPS -H2 text to a 16K page (INITRND, obj.c),
+    so crackhdr() computed the wrong txtaddr and vi read the text
+    segment from the wrong file offset (fixed to 16*1024, matching
+    principia's own copy of this file)
+  * 5i/vi: ifetch()/getmem_w()/getmem_4() composed the 32-bit
+    instruction/memory word as "va[0]<<24 | ..."; the intermediate is
+    computed as a 32-bit int and can look negative, and returning that
+    through a ulong (64 bits on this host, unlike the original 32-bit
+    Plan9 hosts) sign-extended it, corrupting the top 32 bits. Harmless
+    in 5i (every consumer re-masks with a 32-bit constant), fatal in
+    vi's unmasked "itab[(ir)>>26]" dispatch (segfault on a wild index).
+    Retyped instruction/reg.ir and those three functions to u32int,
+    matching the int32 migration already underway in linkers/vl/l.h
+  * 5i/vi: syswrite() forwarded the emulated program's Plan9 pwrite
+    offset straight into the host's real pwrite(2) on fd 1; fine on a
+    tty (offset ignored) but ESPIPE on a pipe (write silently dropped)
+    and corrupts ordering on a regular file (racing bout/bioout's own
+    sequential writes). fd 0/1/2 now use plain write()
+  * tests/s/mini/hello_plan9_{arm,mips}.s: fix stale PWRITE=9 (that's
+    FD2PATH per the current lib_core/libc/9syscall/sys.h numbering);
+    PWRITE is 11
+  * tests/vi/smoke.sh: was pinning the txtaddr bug above as a documented
+    limitation (hardcoded the wrong 0x1020 address, skipped ':c'); now
+    asserts the real entry (0x4020) and runs to completion, like
+    tests/5i/smoke.sh
+  * tests/s/mini/hello_plan9_{arm,mips}.s now print "Hello, world\n"
+    like every other hello test (was "hello world\n", no comma, its
+    own one-off convention); tests/s/mini/mkfile's main `test:` loop
+    (the same one that qemu-runner/wine drive for the other OSes) now
+    also runs these two through 5i/vi and cmp's the output against the
+    shared hello.expected.txt -- hello_plan9_386.exe stays build-only,
+    no x86 Plan9 emulator exists yet
+- fully bootstrapped, with mk bootstrap target inspired by OCaml
+  bootstrap fixpoint process, with lots of bugfixes and extensions
+  to the multiplatform libc (big thx to Claude)
+
+** os
+- build on Windows with either Windows Subsystem Linux (WSL) or Cygwin
+  (but not with Windows native compilers yet)
+- Windows PE experimental support for 386 (8l -H10) and amd64 (6l -H10)
+  working at least on Windows 10, ported from go-era and adapted (thx Claude)
+- macOS Mach-O experimental support for amd64 (6l -H6) and arm64 (7l -H6)
+  working on recent macOS (e.g., macOS 26 Tahoe), ported from go-era
+  and adapted to latest (thx Claude)
+- better Linux ELF support for 386, amd64, arm, arm64, riscv, riscv64, mips
+  with more tests (float and vlong and basic helloprintf working, thx Claude)
+
+** arch
+- real support for 386, amd64, arm, arm64, riscv, riscv64, mips
+  with basic helloprintf.exe working on all those archs, across many OSes
+- experimental support for riscv64
+- experimental support for wasm: assembler+linker only (ea/el),
+  hello world (WASI fd_write) working
+
+** compilers
+- display warning by default and new -q (quiet) to remove the warnings
+- many bugfixes (lots of long -> int32 so can work with gcc/clang)
+
+** libs
+- lib_core/libc: multiplatform and multi OS libc.a (Linux, macOS, Windows
+  syscalls + portable libc code from Plan 9) self-hosted by goken's own
+  toolchain (7c/6c/8c/5c/vc/ic/jc),
+  no gcc involved, for every Linux arch this project targets
+  (arm64/amd64/386/arm/mips/riscv/riscv64) as well as macOS, Windows, and Plan 9.
+  see tests/c/hello_libc (big thx to Claude)
+- found and fixed a genuinely new linkers/5l bug along the way (not
+  present in 9front or principia's own 5l either, just never
+  triggered there): arm's software divide/modulo helpers
+  (_div/_divu/_mod/_modu, needed since arm has no hardware integer
+  divide) failed to link when pulled from an actual library (-lc)
+  instead of a directly-named object file
+- syscalls are declarative: a small "//sys name(args) (ret) = SYS_NAME"
+  .decl spec per OS/arch (in the spirit of GO/pkg/syscall/mksyscall.sh),
+  parsed by scripts/mksyscall.sh into a generated (and committed, like
+  Go does) zsyscall_*.c wrapper around one generic _syscall6 asm
+  trampoline per arch
+- reused/adapted portable pieces from principia (u.h, port/*.c incl.
+  vlrt.c) and, for riscv (no principia/9front port to draw from),
+  from ~/xxx/miller-riscv/ROOT/{riscv,riscv64}/include/u.h -- every
+  ABI claim re-verified against this project's own compilers' -S
+  output and real qemu execution rather than trusted as-is, which
+  caught a real riscv64-only bug (long is 4 bytes there despite
+  8-byte pointers)
+- byproduct fixes found while bringing this up: a vlong-typed `?:`-as-
+  call-argument gap in src/cmd/cc/com64.c (7c/vc/ic/jc's frontend, now
+  matching compilers/cc/com64.c's already-correct version), and
+  vl/il's linker -lXXX resolution ignoring -L entirely
+- libc complete enough so it can be used to compile and 
+  link goken using goken.
+
 
 ** internals
-- rename 5a__/5l__/5c__ to 5a9/5l9/5c9
-  (5a__ was previously renamed from 5a_ that was originally imported
-  from https://bitbucket.org/plan9-from-bell-labs/9-cc.git )
+- split include/ like in principia (and GO/pkg) with include/{core,obj,exec,...}
+- new BOOT/include and moved lib9 to BOOT/lib9 so more visible what
+  is used in "bootstrap" context to build goken using gcc and unix libs
+- remove 5a9/5c9/5l9, the original arm toolchain imported from
+  https://bitbucket.org/plan9-from-bell-labs/9-cc.git; superseded by
+  the kencc (5ak/5ck/5lk) and principia (5a/5c/5l) lineages reconciled
+- also remove mkfiles/arm__ and the "arm__" test variant (tests/c/mini,
+  tests/c/mini2, tests/c/vlong, tests/s/mini) that exercised the
+  now-deleted 5a9/5c9/5l9 lineage under its old 5a__/5c__/5l__ TARG names
+
+** test-infra
+- tests/c/vlong, tests/c/float: cmp output against an expected.txt (like
+  mini2), fix a big-endian mips %t bool bug in print.c (a promoted C
+  vararg bool is 4 bytes, not 1), add arm64/riscv/386 (vlong now covers
+  amd64/arm/arm64/mips/riscv/386; float covers amd64/arm64/riscv/386).
+  riscv and mips both needed their runtime to initialize the compiler's
+  hardwired 0.0/0.5/1.0/2.0 float-constant registers (F28-31 on riscv,
+  F24/26/28/30 on mips) at boot, matching the real plan9 mips kernel
+  convention. arm and mips float stay out of ARCHS: qemu-arm's legacy FPA
+  "FIX" (float64->int32) coprocessor emulation and qemu-mips's
+  double-precision FPU-arithmetic writeback are both buggy in this dev
+  environment (confirmed via minimal hand-written .s, not a toolchain bug)
+  (thx to Claude)
+- start tests/s/variants to compare object and execs produced by the
+  principia lineage vs kencc lineage for 386 and arm
+- start tests/c/variants to compare object and execs produced by the
+  principia lineage vs kencc lineage for 386 and arm
+- more complete tests/s/mini/, tests/c/mini/, tests/c/mini2 supporting
+  most archs and most OSes
+- remove the use of qemu-user-binfmt, not consistent across OSes (Linux vs macOS)
+  and environment (local vs CI) and add a scripts/qemu-runner wrapper instead
+  to factorize things in tests/.../mkfile
+- start tests/s/features and tests/s/regressions covering features added
+  by the "unification" of the many kencc-derived repo (especially 9front)
+- multi-os testing thanks to wine (see tests/s/mini and hello_windows_xxx tests)
+- wasm testing thanks to node (see tests/s/mini and scripts/wasm-runner)
+- start benchmarking infra with https://github.com/AbsInt/CompCert-small-tests
+  test files; for now just testing gcc as goken can't compile such code yet
+  (need APE-like lib or minimal libc/libos support in goken)
+
+** docs
+- add docs/claude_notes/, Claude-authored engineering notes gathered
+  while bringing up or fixing a specific area (done/verified work, not
+  a TODO list -- see CLAUDE.md's own section on these for the
+  conventions): notes_exec_{macho,pe,elf}.txt (executable-format
+  internals per target OS), notes_arch_{arm,arm64,x86,amd64,mips,riscv}.txt
+  (per-arch codegen/ABI fixes), notes_os_{macos,linux,windows,plan9,xv6}.txt
+  (building goken itself on each host OS), notes_abi_plan9.txt (Plan 9's
+  native syscall ABI and the 5i/vi emulators), notes_shared_frontend_bugs.txt
+  (a per-backend status table for bugs recurring across 5c/6c/7c/8c/vc/ic),
+  notes_test_infra.txt (the testing methodology itself), notes_libmach.txt
+  (lib_toolchain/libmach's object-format parsing story), and notes_wasm.txt
+  (the ea/ec/el design) (thx to Claude)
 
 * 0.3 (Q2 2026) (IWP9 presentation)
 
@@ -20,7 +340,13 @@
 - ed: fix segfault on macOS when realloc in 6l/mkenam; use new ptrdiff not int
   on 64 bit machine when computing (64bits) pointer differences
 
+** docs
+- presentation to IWP9 in Canada of goken9cc project (short talk, WIP)
+  and recorded video https://www.youtube.com/watch?v=E3iUpyqKvgk
+
+
 * 0.2 (Q1 2026) (pcc, ASAN, dosfstools, IWP9 paper)
+# started to use Claude in march, especially for ASAN
 
 ** toolchain
 - import pcc from my fork-kencc and adjust to goken (remove need
@@ -31,14 +357,15 @@
   Dockerfile (useful for principia to switch from kencc to goken).
 
 ** test-infra
-- build-docker-principia target
+- build-docker-principia target for regression testing
 
 ** dev infra
-- added configure --asan to use gcc/lang address sanitizer to detect memory errors
+- added configure --asan to use gcc/lang fantastic address sanitizer
+  (=~ very fast purify/valgrind) to detect memory errors
   in the goken tools themselves (e.g., in rc, mk)
 
 ** docs
-- submit WIP to IWP9 (also submitted WIP on xix and full paper on principia)
+- submit WIP to IWP9 (also submitted full paper on principia and WIP on xix)
   with lots of Dockerfile improvements for principia paper and dosdisk.img
   extraction via dosfstools on Linux and macOS
 
@@ -51,6 +378,7 @@
   https://github.com/aryx/fork-kencc put in assemblers/, linkers/, compilers/
   as they are known to work on principia code and I got tired of trying
   to make the golang-origin toolchains working (which are still in src/cmd).
+  (update: later renamed kencc origin tools to 8ak/8ck/8lk/5ak/5ck/5lk)
 - fix the imported 8a/8c/8l, ar, etc. by changing a few long->int32
   (cc/bits.c, x.out.h ieee float), and use -fsigned-char so it can compile
   principia softwarica from my arm64 machine!
@@ -72,6 +400,13 @@
   exploration
 - add lex/yacc (generators)
 
+** arch
+- tested support for arm (32 bits, not arm64), via cross-compiling principia
+- tested support for x86, via cross-compiling principia
+
+** os
+- fix the code so it can build with clang on macOS
+
 ** lib9
 - import open.c/_p9dir.c from plan9port which fixed ls/du/tar bugs
   (still some bugs though)
@@ -84,7 +419,7 @@
 ** test infra
 - multi-arch testing thanks to qemu (see tests/s/mini/, tests/c/mini/)
 - docker build and test working for both amd64 and arm64
-- more C tests in tests/c/{float,vlong}
+- more C tests in tests/c/{float,vlong} (and currently not passing)
 - use principia as a big regression test in docker, and use goken to compile
   all of principia including the kernels for the pi and pc targets!!
 - resume shell.nix and nix.yml GHA for Linux and macOS CI checks
@@ -100,19 +435,18 @@
 - use gcc -fpmath=sse -sse2 on i386 to get portable code and same float behavior
   on 32bits vs 64bits machine
 - remove the need for -Wl,--allow-multiple-definition
-- fix the code so it can build with clang on macOS
-
 
 ** internals
 - convert long -> int32 for 64bits machine and gcc/clang portability
-  for 5a_/5c_/5l_, va/vc/vl, ia/ic/il, 7a/7c/7l
-  TODO: undo and do the minimum like I did for 5c/8c enough to compile/run
-  principia
+  for va/vc/vl, ia/ic/il, 7a/7c/7l
+  (update: partially undo later and do the minimum like I did for 5c/8c enough to compile/run
+  principia)
 - convert a few long -> int32 for the kencc imported 5a/5c/6l, 8a/8c/8l
   (but very few; just in cc/bits.c, x.out.h, and a few other places)
 - move the different toolchains (ix, vx, ...) in assemblers/, linkers/,
   and compilers/ (and kept the golang-origin one in src/cmd/)
 - move src/lib9 to lib_core/lib9 and same for libbio
+  (update: later moved to BOOT/lib9)
 
 ** utilities
 - add utilities/calc/hoc from principia useful to compile the principia kernel
@@ -122,15 +456,26 @@
 
 ** toolchain
 - adapt to goken 7a/7c/7l 
-  (working hello_linux_arm64.exe and helloc.exe on my thelio astra)
-- adapt to goken ia/ic/il (but not tested and actually still fail in Q4)
-- adapt 5a/5c/5l to generate valid arm32 Linux binaries (EABI)
-  (working hello_linux_arm.exe, helloc.exe, and helloprintf.exe also
-   on my thelio astra which can run both arm64 and arm32 binaries)
-- import original 5a/5c/5l from 9cc/plan9 as 5a_/5c_/5l_ and
-  extend also to ELF EABI and working hello_linux_arm_.exe
+  with working hello_linux_arm64.exe and helloc.exe on my thelio astra
+  (update: later undone because "adapt to goken" meant adapt to go-era)
+- adapt to goken ia/ic/il (but not tested and was failing)
+  (update: later undone because "adapt to goken" meant adapt to go-era)
+- adapt 5a/5c/5l to generate valid arm32 Linux binaries (EABI) with
+  working hello_linux_arm.exe, helloc.exe, and helloprintf.exe also
+  on my thelio astra which can run both arm64 and arm32 binaries
+  (update: partially undone later by switching to imported fork-kencc 5a/5c/5l,
+   and further later by synced/fixed principia 5a/5c/5l)
 
-** build
+** arch
+- experimental support for arm64
+  (update: but really tested in 0.3)
+- experimental support for riscv
+  (update: but really tested in 0.4)
+
+** os
+- generate ELF binaries for Linux for arm and arm64
+
+** build infra
 - add mk and rc source code from principia softwarica so self-contained repo with
   build-mk.sh to "bootstrap" mk/rc
 - fix mk/rc for unix (RCMAIN, MKSHELL, import PATH, etc.)
@@ -160,21 +505,34 @@
 # see also pad.org history section
 
 Fork Go repo at Oct 10 2010 at commit 99a10eff16b79cfb8ccf36e586532a40b17a203c
-with a working 6a/6c/6l amd64 toolchain, the 8a/8c/8l x86 toolchain,
+with a working and tested 6a/6c/6l amd64 toolchain, the 8a/8c/8l x86 toolchain,
 and a possibly working 5a/5c/5l arm toolchain, as well as libmach, ar,
 nm, etc.
 
 ** toolchain
 - add mips toolchain va/vl/vc from https://bitbucket.org/plan9-from-bell-labs/9-cc.git
   and adapt it to goken; tested va/vl with vi from principia on hello_plan9_mips.s
+  (update: undone goken adaption later)
 - add arm64 toolchain 7a/7l/7c from 9-cc
   (not tested though)
 - add riscv toolchain ia/il/ic from https://github.com/inferno-os/inferno-os
   (not tested though)
 
+** arch
+- experimental mips support
+  (update: but really tested in 0.4)
+- support for x86 and amd64 (and in theory arm but not really tested)
+
+** os
+- build on Linux
+- build on macOS
+- preliminary work to build on Windows
+- generate binaries for Plan9 for mips
+
 ** internals
 - reorg code with Go related toolchain in GOSRC/ and the C toolchain in src/,
   same for test/ renamed GOTEST/
+  (update: later in 0.4 moved in GO/ and GO/C)
 - start move around Go specific files in GOMISC/ (go editor modes, go shell hooks,
   cgo, go docs, cmd/ebnflint)
 - remove the Google (and obsolete) specifics: src/cmd/hgpatch and lib/corereview
@@ -184,10 +542,11 @@ nm, etc.
 - add Dockerfile.gosrc and docker.yml GHA (Github Action) CI checks,
   and Dockerfile.alpine (just build, no run; does not run unfortunately)
   and Dockerfile.mksrc (just C toolchain)
+  (update: the .mksrc became main Dockerfile later with gosrc -> Dockerfile.golang)
 - add shell.nix and nix.yml GHA for Linux CI checks (but not macOS yet)
 - add basic 'make test' and new tests/s/ and tests/c/
 
-** build
+** build infra
 - add mkfiles to better match kencc and plan9 build system
 - adapt quietgcc to modern Linux (2025) with recent gcc
 - adapt quietgcc to modern macOS (2025) with recent clang
@@ -197,15 +556,15 @@ nm, etc.
 
 * Goken9cc Pre-history
 
-** TODO Cinap 9front: 2019-2025
-- many fixes to 7[alc]
+** SEMI Cinap 9front: 2019-2026
+- many fixes to [67v][alc]
 
 ** Richard Miller: 2018
-- cmd/z[alc]/ for RISC-V (later renamed to i[alc] for riscv and j for riscv64)
+- z[alc] for RISC-V (later renamed to i[alc] for riscv and j for riscv64)
 in https://9p.io/sources/contrib/miller/
 
 ** Charles Forsyth: 2014
-- cmd/7[alc] for arm64
+- 7[alc] for arm64 (and apparently also 6[alc])
 in https://bitbucket.org/plan9-from-bell-labs/9-cc/src/master/
 
 ** Go pre 1.0: 2008-2010
@@ -216,13 +575,14 @@ in https://bitbucket.org/plan9-from-bell-labs/9-cc/src/master/
 fork Go at the October 2010 time to start goken9cc (in May 2025).
 
 *** linker
-+ ELF for Linux
++ ELF for Linux (was started in Plan 9 and inferno)
 + Mach-O for macOS
 + PE for Windows
 
 + DWARF for gdb
 
 *** C compilers
++ ?? mostly adapted for Go use, trampoline, multi-stacks
 
 *** runtime
 + Linux (x86, amd64)
@@ -245,7 +605,7 @@ fork Go at the October 2010 time to start goken9cc (in May 2025).
 
 ** Plan 9: 1985-2002
 Most of the code in goken9cc comes from Plan 9 4th edition:
-- cmd/[05678qtv][alc]/ cc/ and libmach/
+- cmd/[02568kqv][alc]/ cc/ and libmach/
   a multiarch assembler, linker, C compiler toolchain
 - libc/, libbio/
   a new minimalist C library (far smaller than glibc or musl)
@@ -266,14 +626,21 @@ the origin:
 
 ** toolchain
 
-** test infra
-
-** dev infra
-
-** build infra
-
-** internals
-
 ** os
 
 ** arch
+
+** test infra
+
+** build infra
+
+** dev infra
+
+** utilities
+
+** internals
+
+** libs
+
+
+** docs

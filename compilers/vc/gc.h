@@ -1,5 +1,5 @@
-#include	"../../src/cmd/cc/cc.h"
-#include	"../../linkers/vl/v.out.h"
+#include	"../cck/cc.h"
+#include	<obj/v.out.h>
 
 /*
  * vc/mips
@@ -120,7 +120,6 @@ struct	Reg
 };
 #define	R	((Reg*)0)
 
-#define	NRGN	600
 struct	Rgn
 {
 	Reg*	enter;
@@ -175,9 +174,6 @@ EXTERN	int32	exfregoffset;
 #define	CINF	1000
 #define	LOOP	3
 
-EXTERN	Rgn	region[NRGN];
-EXTERN	Rgn*	rgp;
-EXTERN	int	nregion;
 EXTERN	int	nvar;
 
 EXTERN	Bits	externs;
@@ -267,11 +263,11 @@ void	swit2(C1*, int, int32, Node*, Node*);
 void	casf(void);
 void	bitload(Node*, Node*, Node*, Node*, Node*);
 void	bitstore(Node*, Node*, Node*, Node*, Node*);
-int32	outstring(char*, int32);
+long	outstring(char*, long);
 int	mulcon(Node*, Node*);
 Multab*	mulcon0(int32);
 void	nullwarn(Node*, Node*);
-void	gextern(Sym*, Node*, int32, int32);
+void	gextern(Sym*, Node*, long, long);
 void	outcode(void);
 void	ieeedtod(Ieee*, double);
 

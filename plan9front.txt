@@ -1,0 +1,346 @@
+# -*- org -*-
+
+Most of the code in goken9cc derives from code in Plan 9 4th edition
+available at https://9p.io/sources/plan9/sys/src/ and
+https://github.com/plan9foundation/plan9, as well as code from
+https://code.google.com/p/ken-cc/ and https://github.com:golang/go/ at
+the 99a10eff16b79cfb8ccf36e586532a40b17a203c commit point
+(see pad.org for more info).
+
+Some code and fixes come also from 9front at https://github.com/9front/9front
+as well as code maintained by Charles Forsyth for arm64 and Richard Miller
+for riscv.
+
+** arm64 (7a/7c/7l)
+
+ - 7c: gmove() moved a 32-bit int-family value into a
+   vlong/pointer-typed register with a plain 64-bit AMOV, which just
+   copies the raw register bits instead of sign/zero-extending them --
+   not every arm64 instruction leaves a properly extended 64-bit
+   result (e.g. NEGW zero-extends), so a negative int used as a
+   pointer offset could carry garbage in the high 32 bits. Also,
+   cgen()/reglcgen() folded a constant array/pointer offset directly
+   into a load/store's immediate field via ad hoc inline range checks
+   (`v >= -4096 && v < 4096`) instead of calling usableoffset()
+   (already declared in gc.h, but never actually called anywhere) --
+   and usableoffset() itself had an outright logic bug, `return
+   o >= -256 || o < 4095*s;` (should be `&&`), which is true for
+   essentially any offset, plus it never checked the offset is a
+   multiple of the access width as arm64's scaled immediate encoding
+   requires. 
+   => Ported verbatim from 9front (cinap_lenrek):
+     b117d7014 7c: fix long to vlong/pointer conversion, avoid
+   negative immediate offsets
+   (touches cgen.c, txt.c, and the peep.c/reg.c companion changes
+   teaching the peephole optimizer and register allocator about the
+   new ASXTW opcode this introduces). See compilers/7c/{cgen,txt,peep,reg}.c.
+   No dedicated test: extensive probing (misaligned/negative/large
+   constant offsets, through
+   globals, struct fields, and function parameters) never found a
+   reproducible pre/post behavioral difference in this codebase --
+   7l's own aclass()/asmout() addressing-mode selection appears to
+   self-correct regardless of what usableoffset() decides, so the
+   practical effect here may be limited to codegen quality rather than
+   correctness (matching the 9front commit message's own framing:
+   "not so optimal pointer arithmetic instructions"). Applied on the
+   strength of being a verbatim, well-reasoned upstream fix with an
+   objectively-wrong `||` in the original condition. Along the way,
+   found a *separate*, still-unfixed bug: a global array accessed at a
+   compile-time-constant misaligned offset, e.g.
+   `*(long long*)(buf + 4099) = v;`, fails to link entirely with
+   "internal: miscalculated offset" from 7l/asmout.c's case 30/31 --
+   this goes through naddr()'s direct D_EXTERN+offset construction,
+   not the usableoffset()-guarded paths this commit touches, so it's
+   unaddressed here.
+
+ - 7c: gmove()'s "skip the move if source and dest are
+   already the same address" fast-path guard had a missing `a ==`:
+   `if(a == AMOV || (AMOVW || a == AMOVWU) && ewidth[ft] == ewidth[tt] || ...)`.
+   `AMOVW` alone is a nonzero enum constant, so `(AMOVW || a == AMOVWU)`
+   is always true regardless of `a` -- collapsing the guard for *any*
+   gmove opcode (including type-converting ones like the
+   int<->float/vlong conversions right above it) down to just
+   `ewidth[ft] == ewidth[tt]`, i.e. any same-width conversion could
+   spuriously take the "already in place, skip it" fast path via
+   samaddr() and drop the actual conversion instruction. 
+   => 9front's arm64 port has read `(a == AMOVW || a == AMOVWU)` since its very
+   first import (charles forsyth's original commit, no dedicated fix
+   commit to cite -- it was simply never broken there). No dedicated
+   test: constructing a case where samaddr() actually returns true for
+   two differently-typed-but-same-width operands didn't reproduce
+   within this pass's budget; fixed on the strength of the boolean
+   logic being unambiguously wrong as written, confirmed to not
+   regress the existing test suite.
+
+ - 7c: sugen()'s struct/union-copy fallback ("copy:", reached
+   for any struct assignment where neither side is directly
+   addressable, e.g. through a pointer) truncated the byte width via
+   `w /= SZ_LONG;` before laying out the copy, with no handling for
+   the remainder -- any struct/union assignment whose size isn't a
+   multiple of SZ_LONG (4 bytes here) would have its trailing bytes
+   silently dropped. 
+   => Ported 9front's fix verbatim (cinap_lenrek, same
+   commit as the vlong/offset fix above): a byte-by-byte tail-copy
+   loop for the `w % SZ_LONG` leftover bytes before the word-copy.
+      b117d7014 7c: fix long to vlong/pointer conversion, avoid negative immediate offsets
+   No dedicated test: despite extensive probing across struct sizes
+   (10, 30 bytes) and addressing shapes (direct global, through
+   pointers), the buggy and fixed builds produced byte-identical
+   assembly every time -- the surrounding layout()/loop-unrolling
+   logic apparently already rounds its copy width up to a safe
+   over-covering boundary independent of what `w` it's handed, masking
+   the truncation in this codebase's current implementation (same
+   pattern as the usableoffset() fix above: verbatim, well-reasoned
+   upstream fix for an objectively-wrong computation, but no observed
+   behavioral difference here). Confirmed to not regress the existing
+   test suite.
+
+ - 7c: register allocator's regopt() used a fixed
+   Rgn region[NRGN=1000] array (bumped from 600 "for paranoia.c" at
+   some point in this repo's history) and gave up (warn + stop
+   optimizing further, not a crash) past that many candidate regions
+   => same fix as vc's: growable version (starts at 300, grows by 128
+   via allocn()). No dedicated test, same reasoning as vc's version:
+   NVAR caps distinct tracked variables and region count depends more
+   on control-flow complexity than raw size, so a cheap synthetic
+   generator didn't reliably trigger the old cap either.
+
+ - 7c: mkvar() excluded every "."-prefixed pseudo-symbol from
+   register-allocator tracking, including ".ret" -- same fix, same
+   reasoning, as vc's (mips) equivalent: carve out ".ret" specifically
+   so it stays eligible for optimization like any other variable. Not
+   a correctness bug, purely a missed optimization; no dedicated test.
+
+ - 7a/7l: LDAR/LDXR/LDAXR (load-acquire/load-exclusive/
+   load-exclusive-acquire) and STLR/STXR/STLXR (store-release/
+   store-exclusive/store-exclusive-release) -- the atomic primitives
+   needed for spinlocks/mutexes/CAS loops on arm64 -- were broken in
+   several independent ways:
+     - STLR/STLRB/STLRH/STLRW were grammared as the 3-operand
+       exclusive-store form (LSTXR, same grammar as STXR/STLXR, which
+       also return a status register) instead of the correct
+       2-operand plain store-release form (LTYPE3) -- `STLR R2, (R1)`
+       failed to parse.
+     - ALDAR/ALDAXR/ASTLR/ASTLXR had no linkers/7l/optab.c entries at
+       all, so even though 7a's lexer recognized the mnemonics (LDAR/
+       LDAXR were, STLR/STLXR weren't reachable due to the grammar bug
+       above), linking anything using them failed outright with no
+       matching optab entry.
+     - ALDAXRW was encoded with the wrong instruction-size bit in
+       opload() (same bit pattern as ALDARW) -- had it linked, it
+       would have silently executed as a plain load-acquire, dropping
+       the "exclusive" semantics a CAS loop depends on. ASTLXP/
+       ASTLXPW had their 32/64-bit size bits swapped in opstore().
+     - case 59 (stxr) in asmout.c encoded the status register from
+       p->from3, which doesn't apply to STLR (2-operand, no status
+       register) vs STXR/STLXR (3-operand, includes one) -- needed an
+       arity-aware rewrite.
+   Also dropped (matching 9front, not just left as silently-broken
+   placeholders): STLXP/STXP/STXPW/LDXP/LDXPW/LDAXP/LDAXPW, the
+   register-*pair* atomic ops, since those need a genuinely different
+   (4-operand) operand model this port doesn't have.
+   => Ported from 9front, two commits combined (the second is what
+   actually made STLR usable; the first fixed LDAXR/STLXR earlier):
+     223e8ad00 7l, 7c: Remove STLP(W), finish LDAXR(W)/STLXR(W).
+     61f6376b1 7[al]: implement atomic register loads properly
+   tests/s/features/arm64_atomic_ldxr_stxr.s: a real LDXR/STXR
+   compare-and-retry increment loop (the same idiom lock code uses),
+   wrapped in an LDAR/STLR pair, linked and run under qemu-arm64,
+   checked against the expected post-increment exit code. Confirmed
+   the pre-fix build fails outright at *parse* time on `STLR R2, (R1)`
+   (syntax error) before ever reaching the encoding bugs -- a hard,
+   unambiguous regression check. Also discovered along the way (not a
+   9front thing, just how this codebase's `STXR data, (addr), status`
+   argument order works): the operand carrying the store-conditional
+   status result is the *third* operand, not the first, despite naming
+   conventions elsewhere in the assembly suggesting otherwise --
+   documented in the test's comments.
+
+ - 7l: linkers/7l/asmout.c's case 30/31 (global-variable load/store
+   through a `L(R)` SB-relative operand) always materialized the
+   target as REGSB + hi via a single ADD-immediate, which can only
+   encode ~16MB (imm12, optionally <<12) -- any symbol whose linked
+   SB-offset exceeded that (trivially true once lib_core/libc/port/
+   minimal_malloc.c's own 64MB heap[] existed and pushed some later
+   symbol's offset past it) got a silently wrong, not diagnosed,
+   address. Root-caused chasing an arm64-only SIGSEGV regression in
+   three benchs/compcert programs (nsieve.c, nsievebits.c, spectral.c)
+   -- see docs/claude_notes/notes_arch_arm64.txt for the full
+   diagnosis writeup and docs/claude_notes/notes_debug_techniques.txt
+   for the bisection method. Goken's own case 47/48 (the intended
+   fallback) and olsxrr() (the load/store-extended-register helper it
+   needs) already existed in source but were dead code: case 30/31
+   never branched to them, olsxrr() was still an unconditional
+   diag()-and-fail stub, and case 47/48 itself had a latent bug
+   (`omovlit(AMOVW, ...)` instead of `omovlit(AMOV, ...)`, building
+   only the low 32 bits of the 64-bit REGTMP address) -- a previously
+   started, never-finished port of the same 9front commit below.
+   => Ported verbatim from 9front (cinap_lenrek):
+     1d330c0bd 7l: deal with huge (negative or > 24bit) register
+   offsets, fix LACON, avoid DWORD in constant pool when we can sign
+   extend
+   (this same commit's DWORD/constant-pool-widening half was already
+   ported separately -- see linkers/7l/span.c's addpool() comment; this
+   entry is specifically the case 30/31 + case 47/48 + olsxrr() half,
+   which had not been). Also added the LTO/LFROM flags to the
+   AMOVB/AMOVH/AMOVW/AMOV C_LEXT rows in linkers/7l/optab.c (9front
+   already has these; goken's port had them on AFMOVS's C_LEXT rows
+   but not the integer ones, so span() never called addpool() for the
+   integer case, meaning omovlit() could never take its literal-pool
+   path for them even once case 30/31 started calling it).
+   tests/c/regressions/arm64_large_bss_sb_offset.c: confirmed fails
+   (exit 2, not 0) against the pre-fix linker and passes after; all 22
+   benchs/compcert GOKENPROGS pass after the fix via a full `mk test`.
+
+ - 7a: assemble() had the exact same fixed `char ofile[100]`/
+   raw strcpy() stack buffer overflow as va's (see below) -- found
+   organically when a feature-test source file happened to live at a
+   long scratch path and 7a crashed the same way ("*** stack smashing
+   detected ***"). 
+   => Same fix, same origin (9front): strdup()/smprint()
+   instead of fixed buffers. See
+   tests/s/regressions/arm64_long_filename.s.tmpl.
+
+** mips (va/vc/vl)
+
+ - va: assemble() copied its filename argument into a fixed
+   `char ofile[100]` with a raw strcpy() and no bounds check --
+   confirmed this crashes ("*** stack smashing detected ***", SIGABRT)
+   on a source path >=100 bytes. 
+   => Ported 9front's fix: dynamically
+   sized via strdup()/smprint() instead. See
+   tests/s/regressions/mips_long_filename.s.tmpl.
+
+ - va/vc/vl: LL (load-linked) / SC (store-conditional) / SYNC
+   (memory barrier) atomic instructions, needed for spinlocks/mutexes
+   on MIPS
+   => ported from 9front's sys/src/cmd/v[al]/*, by mia soweli:
+     10f1eeb7d v[al], libmach: add LL (load-linked) and SC (store-conditional)
+     ca2589a11 v[al]: add SYNC (memory barrier)
+     e7d099ac4 vl: LL operand order and scheduling
+     2eb28f43e vl: atomic instruction scheduling
+   See tests/s/features/mips_atomic_llsc.s.
+
+ - vl: linker instruction scheduler could hoist a stack-pointer
+   -adjusting instruction above an earlier load in the same window,
+   changing the load's effective address if reordered
+   => ported from 9front's sys/src/cmd/vl/sched.c, by cinap_lenrek:
+     40ed531364 vl: prevent stack altering instructions to be hoisted above loads
+   (found via a libmemdraw bug on real 9front; no dedicated minimal
+   test in this repo yet -- see linkers/vl/sched.c sched().)
+
+ - vc: register allocator's regopt() used a fixed
+   Rgn region[600] array and gave up (warn + stop optimizing further,
+   not a crash) past 600 candidate regions.
+   => ported 9front's growable
+   version (region starts at 300, doubles via allocn() as needed). No
+   dedicated test: NVAR=160 caps distinct tracked variables, and
+   reaching 600 *regions* needs enough control-flow complexity that a
+   cheap synthetic generator (2000 statements, 700 distinct locals)
+   still didn't trigger the old cap in testing.
+
+ - vc: mkvar() excluded every "."-prefixed pseudo-symbol from
+   register-allocator tracking, including ".ret" (the function
+   return-value pseudo-variable, see compilers/vc/txt.c ginit())
+   => ported 9front's carve-out so ".ret" specifically stays eligible for
+   optimization like any other variable. Not a correctness bug, purely
+   a missed optimization; no dedicated test (nothing to observably
+   fail, just a quality difference in generated code that would need a
+   golden-object diff to show, and this repo doesn't otherwise
+   golden-diff vc's own register allocator's choices).
+
+ - vc: cgen()'s OFUNC case didn't strip a leading comma
+   expression from the callee before checking it's a plain indirect
+   call (l->op == OIND), e.g. a function pointer reached through
+   `(sideeffect(), fp)(args)` -- so a complex-enough comma-wrapped
+   callee hit "diag(n, "bad function call")" or miscompiled instead
+   of working. Fixed with `l = uncomma(l);` (uncomma() already exists
+   in shared cc/ code, and compilers/8ck/cgen.c, compilers/8c/cgen.c
+   and compilers/7c/cgen.c all already have this exact call -- vc was
+   the odd one out). No dedicated test: getting the compiler down this
+   specific "complex indirect call through a comma expression" branch
+   with a small snippet didn't work within this pass's budget (a
+   `(g(), fp)()` -style test compiled to identical code with and
+   without the fix, meaning it wasn't taking the intended path);
+   applied on the strength of the fix being a verified no-op unless
+   l->op == OCOMMA, and already proven correct by 3 sibling backends
+   in this same repo.
+
+ - vc: align()'s Aaut3 case ("total align of automatic") never
+   set `w`, so stack "safe" spill-temp regions (regsalloc(), used e.g.
+   when marshaling a call whose argument itself contains another call)
+   were not rounded up to a MIPS word, skewing the whole function's
+   frame size by a non-word amount. The 5c/7c (arm/arm64) backends
+   already carried the fix (imported from principia-softwarica, itself
+   independent of 9front); 
+   => ported the same one-line fix to vc. 9front
+   found and fixed the identical bug in their vc, independently:
+     e8c8f5d82 vc: word align automatics
+   See tests/c/regressions/mips_aut3_align.c.
+
+** riscv (ia/ic/il)
+
+9front doesn't have a riscv port, so this section credits a different
+kencc-derived fork instead: miller-riscv (a Plan 9 riscv port,
+checkout dated June 2025), found the same way as the arm64/mips
+sections above -- diffing via scripts/diff.rc (~/xxx/miller-riscv/).
+The bulk of goken's own riscv64 ('j'/thechar='j') bring-up this
+session (ja/jc/jl, the ELF header-size fix, the setSB/symbol-address
+fix, the ic/jc stale-pointer-width fix) was goken-original work, not
+ported from anywhere, so it isn't listed here -- see git log instead.
+
+ - il: slliw/srliw/sraiw (the RV64-only word-shift-immediate
+   opcodes, used for shifts on plain 32-bit ints) were wired to
+   asmout()'s case 2 ("addi $I,[R,]D" -- a plain 12-bit signed
+   immediate), instead of case 1 like their 64-bit-register siblings
+   slli/srli/srai use, which additionally ORs in o->param to select
+   the arithmetic-vs-logical distinguishing bit. Since case 2 never
+   applies o->param, SRAIW's encoding came out byte-identical to
+   SRLIW's: it silently executed as a logical instead of arithmetic
+   right shift, discarding the sign of "x >>= n" on signed ints.
+   Confirmed real under qemu-riscv64 before landing the fix (an
+   optab.c "type" field change, 2 -> 1, matching miller-riscv exactly).
+   See tests/c/regressions/riscv64_sraiw.c.
+
+ - include/arch/{riscv,riscv64}/u.h's base scalar typedefs and
+   va_start/va_arg shape (the general "round to N-byte slot, and for
+   riscv also 8-byte-align an 8-byte-or-wider vararg" structure) are
+   adapted from ~/xxx/miller-riscv/ROOT/{riscv,riscv64}/include/u.h --
+   the only riscv reference this project has at all, credited above.
+   Not a straight copy though, and one detail from it doesn't apply
+   here: goken's own ic/jc is an independently-implemented compiler,
+   not the same binary as miller-riscv's, so every va_start/va_arg
+   claim was re-verified against real ic/jc -S output and actual
+   qemu-riscv/qemu-riscv64 execution of a real va_arg sequence (not
+   just static inspection -- see docs/claude_notes/notes_arch_riscv.txt
+   for why the latter mattered) rather than trusted as-is. One real,
+   riscv64-specific bug surfaced this way that miller-riscv's own
+   uintptr/intptr typedefs (correctly `unsigned long long`/`long long`
+   there, not `unsigned long`/`long`) already avoid: see that same
+   notes file for the full story.
+
+** amd64 (6a/6c/6l)
+
+ - 6l: linkers/6l/optab.c's APSLLQ (packed 64-bit shift-left-by-
+   immediate) entry used opcode byte 0x7e for its reg,imm8 encoding --
+   0x7e is MOVD/MOVQ, not a shift, and has no trailing immediate
+   operand, so "PSLLQ $imm, X" assembled to a MOVQ with the shift
+   count byte spilling into whatever came next. The sibling entries
+   (APSLLL, APSLLW, APSRLQ, and APSLLQ's own memory-operand form right
+   next to it) all correctly use 0x72/0x71/0x73. Confirmed real under
+   qemu-amd64 before landing the fix: "MOVQ $1,AX; MOVQ AX,X0; PSLLQ
+   $4,X0; MOVQ X0,DI" came back 0 (no-op) instead of 16. One-byte fix
+   (0x7e -> 0x73). See tests/s/regressions/amd64_psllq.s.
+
+ - 6c, and independently 8c/8ck: mulgen1() (the constant-multiply
+   strength-reduction search) never special-cased a multiplier of 0,
+   so "x *= 0;" failed to compile outright with "mulgen botch" (an
+   internal-error diagnostic), after already emitting code that just
+   left x unchanged instead of zeroing it. Ported 9front's fix: a
+   3-line early-out at the top of mulgen1(), "if(v == 0){ zeroregm(n);
+   return 1; }" (zeroregm() already existed in each compiler, used
+   elsewhere for the same "materialize a zero" purpose). Confirmed
+   real on all three backends before landing the fix ("6c/8c/8ck -c"
+   on a small "x *= 0;" repro all failed with "mulgen botch"; fixed,
+   they all compile and the linked binary correctly computes 0). See
+   tests/c/regressions/mulzero.c.

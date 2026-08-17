@@ -1,0 +1,1193 @@
+Adding a WebAssembly (wasm) target: ea, el, and design notes for ec
+====================================================================
+
+Notes gathered while adding an experimental wasm arch (letter 'e') to
+this toolchain: assemblers/ea, linkers/el, include/e.out.h, and now
+compilers/ec (the C compiler backend, reusing compilers/cck's shared
+frontend). Written to be read before touching any of those. The "Open
+questions for ec" section at the end tracks what's still unimplemented
+(float arithmetic, general address-of-a-local) now that the bootstrap,
+if/else, all of C's loop constructs (while, for, do while, including
+nesting/break/continue and loop rotation), switch/case (standalone and
+inside a loop with its own backward branch), string literals, address-
+of for globals/statics and for a variadic function's own named
+parameter, pointer dereference, increment/decrement, compound
+assignment, the variadic-call ABI, initialized global/static data
+(including vlong-width statics), a function's real per-param/result
+ASIGNATURE (not a hardcoded 'W'/'V', needed for a float64 return value),
+el linking multiple files that each have their own file-local
+(D_STATIC) data, and el importing more than one WASI function with
+different signatures are all done.
+
+See tests/s/mini/hello_wasm.s (hand-written ea assembly) and
+tests/s/mini/hello_wasm.wat (the same program in traditional
+WebAssembly Text, for comparison) for ea/el, and
+tests/c/mini2/regress_wasm.c for ec (straight-line arithmetic,
+recursion, if/else, and all of while/for/do-while -- see that file's
+own comments for what each function checks).
+
+tests/c/mini2/hellowrite_wasm.c is this arch's first *real*,
+running tests/c/mini2 example -- an actual C program's stdout compared
+against expected.txt via cmp, the same way every other arch's
+helloprintf.exe is checked, rather than regress_wasm.c's self-checking
+return-code trick. tests/c/mini2/helloprintf_wasm.wasm is the full
+version of that: the real, unmodified helloprintf.c + test.c +
+print_nofloat_no64.c (the exact same three files every other arch
+compiles), linked via wasi_wasm.s and checked against the one shared
+helloprintf.expected.txt every other arch already uses -- byte-for-byte
+identical output, not a separate wasm-specific expected.txt or a
+wasm-specific stand-in main() (an earlier session had a
+helloprintf_wasm.c stub for this, since retired once the real file
+worked). See "Initialized global/static data..." and "A function's real
+ASIGNATURE..." below for what it took to get here. tests/s/mini/mkfile's
+storeorder_wasm.s is a from-a-different-angle sibling: hand-assembled
+rather than ec-compiled, and built specifically to catch a real
+STOREx-operand-order bug (below) rather than to demonstrate a full C
+program.
+
+
+Why 'e' for the arch letter
+----------------------------
+
+Every other arch letter here is either a digit (historical, assigned
+in the order Plan 9 grew ports) or a non-digit letter picked once
+digits ran out (k = sparc64, q = power64, u/v = sparc/mips in the
+Plan9 lineage; this project's own i = riscv). None of them are
+mnemonic, so there was no requirement to make wasm's letter mnemonic
+either -- just to avoid a letter that collides with an existing Unix
+command when combined with the c/a/l suffixes (w -> wc collides with
+the word-count command), and to avoid letters this project's own
+history already associated with something else (j and z were both
+tried for riscv at different points before it settled on i). 'e' has
+no such history and no collision (ec/ea/el are all unclaimed), and
+loosely suggests "engine" (Wasmtime/Wasmer are called wasm engines)
+or Emscripten, which is as much mnemonic value as any other arch
+letter here has.
+
+
+The D_* operand-kind enum: type vs name, not additive
+-------------------------------------------------------
+
+Three different conventions already coexist in this codebase for
+"how does Gen encode an operand":
+
+  - x86/amd64: one field, D_INDIR is *additive* onto a base value
+    (D_EXTERN + D_INDIR means "indirect through extern").
+  - arm: two separate enum *types*, Operand_kind (encoding) and
+    Sym_kind (storage class), as two different struct fields with
+    unrelated value spaces.
+  - riscv/mips: one enum *namespace*, split across two struct fields
+    (Gen.type = encoding, Gen.name = storage class) that happen to
+    share one set of integer constants.
+
+e.out.h follows riscv/mips's convention specifically: D_EXTERN/
+D_STATIC/D_AUTO/D_PARAM only ever mean something when paired with
+Gen.type == D_OREG (a symbol reference), because D_LOCAL/D_GLOBAL
+(wasm's locals/globals) never take a "which region" qualifier at all
+-- there's exactly one kind of symbol reference here, not several
+that could independently be "made indirect" the way x86's many
+register-class values could. An earlier draft of this file used the
+x86-style additive D_INDIR by mistake before this was caught; if
+you're porting logic from another arch's obj.c/Gen handling, check
+which of the three conventions that arch uses before assuming it
+matches this one.
+
+
+No register file: what that changes
+--------------------------------------
+
+Every other arch's Gen has a `reg` field (or several: reg/xreg/index)
+naming a hardware register. wasm has none, so e.out.h's Gen has no
+such field at all. Concretely:
+
+  - REGRET, REGSP, REGTMP as *hardware registers* don't exist.
+    Arguments and results live on wasm's implicit operand stack, in
+    the order the function's type gives them -- there's no register
+    to name for "the return value" the way REGRET names one
+    elsewhere.
+  - REGARG must still be defined (cck/pgen.c reads it unconditionally
+    to decide whether to pass the first argument in a register), and
+    it's -1: not just "disabled, matching every other arch in this
+    project's own REGARG=-1 convention", but the only value that's
+    even meaningful here, since there's no register to shortcut
+    through.
+  - What every other arch calls "a register" splits into two
+    unrelated wasm concepts: D_LOCAL (per-function, typed, unbounded
+    -- allocating one per live temporary is fine, there's no spill
+    logic to write) and D_GLOBAL (module-level, typed; currently only
+    used for the shadow stack pointer, SPGLOBAL = global index 0).
+  - A wasm local's *address* cannot be taken, unlike a stack slot on
+    a real machine. This is the one piece of the design that reaches
+    forward into ec (see below): D_AUTO/D_PARAM only make sense for
+    C variables whose address is never taken (compiled straight to a
+    D_LOCAL); anything address-taken needs a different, heavier
+    lowering. e.out.h reserves the concept (a linear-memory "shadow
+    stack", addressed relative to SPGLOBAL, exactly like D_AUTO/
+    D_PARAM work everywhere else) but doesn't implement it -- there's
+    no compiler yet to decide which C variables need it.
+
+
+What a "shadow stack" actually is
+--------------------------------------
+
+Worth spelling out in full, since every other arch in this project
+gets this for free from real hardware and never has to name the
+concept explicitly.
+
+On 5c/6c/7c/8c/vc/ic, a C local or parameter that has its address
+taken (`&x`) just works, for free: the compiler puts `x` at some
+offset from the hardware SP/FP register, and `&x` is simply "SP/FP
+plus that offset" -- no different in kind from any other pointer
+value. Because every stack-resident local lives in the *same* byte-
+addressable memory, laid out in a predictable order (arguments
+adjacent to each other, in argument order), pointer arithmetic across
+them works too: `&x + 1` genuinely lands on whatever the compiler put
+right after `x`. This is exactly what a variadic function's `va_arg`-
+style machinery (see print_nofloat_no64.c's `vprintf`: `arg =
+(byte*)(&s+1)`) depends on -- it does not know or care about `s`'s
+type or the callee's frame layout in general, only that "the next
+argument's address is the previous argument's address plus its own
+(aligned) width", which is only true if arguments are actually
+adjacent in real memory.
+
+wasm has no hardware stack a compiler can address into. A wasm
+function's own locals (D_LOCAL here) are a separate, opaque index
+space -- more like a bank of named registers than memory -- and there
+is no instruction in the whole ISA that produces "the address of
+local #3", because locals were never given addresses to begin with
+(see "No register file" above). So `&x` has nothing to compute *from*
+when `x` is a true wasm local.
+
+The fix, used by every real-world wasm toolchain (LLVM's wasm32
+target, Emscripten, etc.), is to reserve a region of ordinary linear
+memory -- the same byte-addressable memory that already holds string
+literals and globals here -- and use it as a stand-in stack purely
+for the values that need a real address. It's called a "shadow" stack
+because it shadows only that *slice* of what a real machine's stack
+holds: locals that are never address-taken still live as true wasm
+locals and never touch it, so the common case (this project's
+existing control-flow tests, hellowrite_wasm.c's write() call) costs
+nothing extra. A dedicated wasm global (SPGLOBAL, global index 0)
+plays the role a hardware SP register plays elsewhere: it holds the
+current address of the shadow stack's "top", and a function that owns
+any shadow-stack slots decrements SPGLOBAL by its frame's shadow-
+stack size on entry (reserving its slots) and restores it on every
+exit path -- the wasm-native rendering of a normal prologue/epilogue,
+just written as explicit global-manipulating instructions instead of
+relying on hardware push/call/ret. e.out.h's D_AUTO/D_PARAM name a
+byte offset from SPGLOBAL for exactly this reason: deliberately given
+the same shape as a real arch's own stack-relative Adr encoding, so
+that whatever ec code ends up computing "the address of a local" can
+look structurally like 6c's or ic's equivalent code, rather than
+inventing a wasm-only representation for what is, conceptually, the
+same idea (a stack-relative address) implemented in software instead
+of hardware.
+
+Concretely, this is the actual, single blocker for a real variadic
+printf() on wasm: `vprintf`'s `&s+1` can only be a meaningful address
+if `s` and the variadic arguments after it all live in the shadow
+stack, laid out contiguously in argument order -- mirroring the real-
+arch C ABI closely enough that the *same*, unmodified vprintf() from
+print_nofloat_no64.c keeps working unchanged. A true wasm D_LOCAL can
+never support this, address-taken or not, because it was never memory
+in the first place; only a shadow-stack slot can.
+
+
+No virtual AMOVx: why, and what replaced it
+-----------------------------------------------
+
+The first working draft of this arch had one AMOVx family (AMOVB..
+AMOVQ, one opcode per width/sign) used exactly like arm/x86/riscv's
+own AMOVx: one mnemonic, direction and operand kind (immediate,
+memory, local, global) inferred from the Gen shapes, `outcode()`'s
+job to sort out. That's real Plan9 precedent (5.out.h literally
+comments "AMOVW, // VIRTUAL, transformed in load and store
+instructions"), but it doesn't actually fit here, for a reason that's
+specific to wasm rather than a stylistic preference:
+
+On a real arch, AMOVW works as one 2-operand mnemonic because there
+is always a *register* to be the other side -- LDR/STR/a register
+move are three encodings of "get a value into/out of a named place",
+and that named place is always a register. wasm has no register to
+play that role. So the same mnemonic ended up meaning different
+*arities* depending on context: `MOVW $1` (one operand: push and
+leave on the stack, because wasm's calling convention passes
+arguments via a push sequence, not a named location an arch's own
+REGARG/stack-slot convention could read back from) vs `MOVW
+$1, LOCAL(2)` (two operands: an actual move). A programmer coming
+from 5a/8a/ia would reasonably expect "MOVW" to always be a 2-operand
+move, the same way it always is on every arch they already know --
+having it sometimes be a bare push instead is exactly the kind of
+surprise that defeats the point of reusing a familiar mnemonic in the
+first place.
+
+The fix: keep the Plan9-*style* naming and pseudo-registers where they
+map onto a real wasm concept, and give the rest of the operations
+their own single-purpose opcodes, one per real wasm instruction, with
+exactly the operand *that instruction's own binary encoding* carries:
+
+  - ACONSTW/Q/F/D: one operand, the immediate -- iNN.const/fNN.const
+    really do carry a value in their encoding.
+  - ALOCALGET/SET/TEE, AGLOBALGET/SET: one operand, the index --
+    local.get/local.set/... really do carry an index.
+  - ALOADx/ASTOREx: one operand, the memarg *offset* -- i32.load's
+    encoding carries an offset+align pair, but the base *address* is
+    not part of the instruction at all; it comes off the stack,
+    pushed by whatever precedes the load/store. This is also exactly
+    what WAT's own nested
+    `(i32.store (i32.const addr) (i32.const val))` encodes: the
+    address sub-expression is evaluated (pushed) before the value
+    sub-expression, address ends up below value on the stack, which
+    is the order i32.store requires when it pops them. A flat,
+    one-instruction-per-line assembler has no nesting to do that
+    implicitly, so ea's grammar (a.y) does it explicitly: writing the
+    familiar `LOADW msg+4(SB)` or `STOREW off(SP)` expands, in the
+    grammar action, into *two* real instructions -- push the base
+    address (an ACONSTW-with-symbol for SB, an AGLOBALGET(SPGLOBAL)
+    for SP/FP), then the actual ALOADx/ASTOREx carrying just the
+    offset. This is legitimate, existing Plan9 precedent for a
+    written mnemonic expanding to more than one real encoded
+    operation (see 5.out.h: "ASLL, // Shift Left Logic, VIRTUAL
+    transformed in bitshifted registers"), just applied here to
+    preserve the *addressing syntax* (SB/SP/FP) rather than a single
+    mnemonic's arity.
+  - AWRAPQ/AEXTW/AEXTWU/ACONVWF/ATRUNCFW/APROMOTE/ADEMOTE/etc: *zero*
+    operands. i32.wrap_i64, i64.extend_i32_s, f32.convert_i32_s, and
+    the rest of the register-only conversions carry no immediate at
+    all in their real encoding -- they only ever transform whatever's
+    already on the stack. Named after the wasm spec's own verbs
+    (wrap/extend/convert/trunc/promote/demote) rather than "MOV",
+    since there's no addressing or moving involved.
+
+What still *does* carry over unmodified, because it maps onto a real
+concept on both sides: SB/SP/FP as pseudo-registers (SB = the
+module's data base, SP = the shadow stack pointer global, FP =
+address-taken parameters -- same roles as on every other arch, just
+implemented differently underneath), TEXT/GLOBL/DATA/WORD (identical
+concept: declare a function, a data symbol, its bytes, a raw word),
+and CALL/RET/BR (still "transfer control, with an operand" -- BR's
+operand is a label depth instead of a PC displacement, the one place
+where even the *concept*, not just the encoding, differs; see next
+section).
+
+The rule of thumb that came out of this, for anyone adding more
+opcodes later: port the *name and surface syntax* when the concept is
+the same on both sides (a symbol, a control transfer, a pseudo-op);
+give it a new, wasm-native name when the concept doesn't actually
+exist the other way (no register to move between, no operand where
+the real encoding has none).
+
+
+Structured control flow: label depths, resolved by the assembler
+--------------------------------------------------------------------
+
+wasm has no unstructured jump. `br`/`br_if` target a label *depth*:
+how many enclosing block/loop/if constructs to exit, counted outward
+from the branch site -- not a PC-relative displacement the way every
+other arch's branches work, and not something a linker's second pass
+over the whole program needs to compute either. Depth is a purely
+lexical property of the function being assembled: it only depends on
+how deeply BLOCK/LOOP/IF/END are nested around the BR at the point
+it's written, which ea's grammar (a.y) already knows while parsing,
+by maintaining a small stack (`labelstack`/`nlabelstack`) pushed on
+BLOCK/LOOP/IF and popped on END. A named target (`BR myloop`) looks
+itself up in that stack; a raw target (`BR (2)`) is taken as a depth
+directly. By the time `outcode()` is called, the depth is already
+final -- there is nothing left for el to resolve, unlike every other
+arch's D_BRANCH, which the object file carries unresolved and the
+linker patches in a second pass.
+
+One consequence: there is deliberately no PC pseudo-register for
+branch targets the way arm/x86/riscv have one (`con(PC)`). Since
+depths aren't PC-relative, spelling a branch target as "PC" would
+suggest an addressing mode that doesn't actually exist here.
+
+ABRTABLE (br_table, a jump table) has no grammar support yet -- it
+needs a list of targets, and no test needs it. ACALLIND (call_indirect)
+is in the same state -- it needs a type-section index, which doesn't
+mean much before ec exists and functions have real signatures.
+
+
+el: a single-pass linker (why there's no span.c/layout.c/relocation table)
+---------------------------------------------------------------------------
+
+A real arch's linker needs a full relocation mechanism and often an
+iterative layout pass (span.c's branch-shortening feedback loop)
+because: branches are PC-relative and the final PC of a symbol isn't
+known until layout is mostly done; multiple object files can
+reference each other's symbols in either direction, including
+circularly. Neither problem exists here in the same way: wasm
+branches are already fully resolved by ea (see above), and el only
+ever reads one object file (no cross-file forward references to
+worry about). So el's whole job collapses to: read the one object
+file (obj.c), assign every symbol a function index or a linear-memory
+arena offset in one pass (asm.c's layout()), then emit the module.
+The one thing that still needs deferred resolution is a DATA record
+whose value is itself a symbol's address (`DATA iov+0(SB)/4,
+$msg(SB)`) -- msg's arena offset isn't known until layout has run --
+handled by a short deferred-patch list (l.h's DataReloc), applied
+right after layout and before any code is emitted. This is
+deliberately much smaller than a real relocation table: it only ever
+needs to run once, in one direction, because there's only one object
+file and layout is a single pass.
+
+optab.c/oplook() mirror every other arch's Optab/oplook() in spirit,
+simplified because there's no operand-*class* dispatch to do: a real
+arch's oplook() picks among several Optab rows for the same opcode
+depending on which addressing mode aclass() classified the operands
+into (register vs immediate vs various memory forms); a wasm opcode
+has exactly one encoding, full stop, so el's table is keyed by opcode
+alone and asm.c's fetch()/store() (not oplook()) are what branch on
+operand *kind* (const/local/global) to pick the right push/pop
+sequence.
+
+-I symbol=module.field (linkers/el/main.c) tells el that an otherwise-
+undefined CALL target should become a wasm import instead of a link
+error -- the same role -I plays for 6lg's Mach-O dynamic imports
+(tests/s/mini/hello_macos_libc_amd64.s), just adapted to wasm's
+two-level (module, field) import naming instead of a library path.
+v1 hardcodes one import signature (4 x i32 -> i32, i.e. WASI's
+fd_write) since nothing else is needed yet; a real -I would need to
+also specify the signature once more imports show up.
+
+
+What's implemented and verified by a test
+----------------------------------------------------
+
+hello_wasm.s exercises ACONSTW (including the address-of-symbol
+form), ACALL, ARET, and ADROP, plus the TEXT/GLOBL/DATA pseudo-ops, via
+ea+el. tests/c/mini2/regress_wasm.c exercises ec's straight-line
+arithmetic, calls (including recursion), real per-function signatures
+(ASIGNATURE), if/else (if-with-no-else, both-branches-terminate,
+neither-terminates, else-if chains), and `while` (plain, break,
+continue, nested, if-inside-while), via ec+el. Load/store of globals,
+locals beyond what regress_wasm.c needs, and the register conversions
+are implemented against the wasm spec but not yet exercised by any
+test -- treat those the way a freshly-added Optab row on a real arch
+would be treated before its first test: plausible, not proven.
+
+ec's control flow, in one paragraph: gbranch()/patch() (txt.c) are
+now, deliberately, almost identical to a *real* arch's -- gbranch(
+OGOTO) emits an unresolved ABR and hands back its Prog* in the global
+`p`; patch(that Prog*, pc) fills in `to.offset` with a raw target pc,
+exactly like ic/txt.c's D_BRANCH. boolgen()'s branch form (cgen.c)
+emits the matching conditional placeholder, ABRIF, the same way. This
+covers if/else, while, and break/continue uniformly, since it's the
+same gbranch(OGOTO)/patch() shape pgen.c already emits for all of
+them -- an earlier version of this file special-cased if/else's own
+call pattern directly in gbranch()/patch(), which worked but had no
+way to generalize to loops (see git history around the "flat-PC +
+restructure pass" commit for what that looked like and why it didn't
+scale). The wasm-specific part -- turning this flat, PC-addressed
+list into properly nested block/loop/br/br_if -- happens once per
+function in reg.c's regopt(), reusing the same hook every other arch's
+regopt() (register allocation) already runs there. Full algorithm in
+reg.c's own comments: jump-threading, dead-code elision (which is also
+how the redundant trailing return codgen() always appends gets
+silently dropped, replacing the older per-if AUNREACHABLE-insertion
+trick), scope construction, and emission. Two real subtleties
+reg.c had to account for, both explained in detail in safeopen()'s and
+extendscopes()'s own comments: a wasm block/loop resets what's visible
+on the operand stack, so a block wrapping a value-consuming branch
+(ABRIF) must open before that value's own computation, not at the
+branch itself; and some scope pairs (if/else's own "skip the else"
+jump, in particular) partially overlap in the flat list and need
+widening into proper nesting rather than nesting for free.
+
+A structural limitation found this way, since fixed: C `for` and
+`do while` both have an entry jump that skips straight into the middle
+of what the back-edge treats as the loop (for skips the first
+increment, do-while skips the first test) -- landing inside a scope
+from outside it, which plain block/loop nesting cannot express (only
+"jump to a scope's start" or "past its end"). This is *not* a gap
+specific to this codebase's approach -- it is exactly why real
+compilers apply "loop rotation" (also called loop inversion) as a
+standard transformation: LLVM ships it as its own pass
+(llvm/lib/Transforms/Utils/LoopRotationUtils.cpp), and it is covered
+as a named loop transformation in the compiler-optimization literature
+(e.g. Muchnick, "Advanced Compiler Design and Implementation", Morgan
+Kaufmann 1997, in the loop-transformations chapter). The classic
+motivation there is different from ec's -- turning `while(cond) body;`
+into `if(cond) { do body; while(cond); }` so each iteration tests the
+condition once instead of twice (a perf win on real hardware) -- but
+the shape of the rewrite is the same one ec needs, for a structural
+reason instead of a performance one: after rotation, entry and the
+back-edge land on the *same* instruction (the moved-forward test+body,
+for `for`; the body, for `do while`), which is exactly what wasm's
+`loop` construct requires of anything branching back into it.
+
+ec's rotateloops() (reg.c) implements this as a pure rearrangement of
+the *already-generated* flat instructions -- swapping the increment
+(or test, for `do while`) block with the test+body block it used to
+jump over, then fixing up whichever one instruction was the loop's own
+automatic back-edge to target the new, unified entry point -- rather
+than by re-emitting anything. One further wrinkle specific to *nested*
+for/do-while (one directly inside another's body): the outer loop's
+own back-edge instruction can itself get jump-threaded away as dead
+code by markdead(), because the inner loop's own conditional test-exit
+branch already reaches the outer increment directly without needing
+that extra hop -- valid on a flat/arbitrary-target arch, but wasm
+still needs an explicit instruction to close the outer `loop`.
+rotateonce_insert() (reg.c) handles that case by synthesizing the one
+missing instruction (a bare, unconditional branch back to the loop's
+new entry point) and splicing it in, rather than trying to repurpose
+an instruction that in this case genuinely does not exist in the
+already-compacted flat list. findrotation() also rotates whichever
+loop has the smallest span first, so arbitrarily deep nesting resolves
+inside-out, one already-clean loop at a time. reg.c's validatescopes()
+remains in place as a safety net (should never fire in practice now)
+rather than being removed, on the theory that a safety net catching
+"impossible" cases is cheap insurance against a future regression.
+
+A separate subtlety, found only once a function had more than one
+local: every local (param or auto) shares ec's single flat wasm-local
+index space (see txt.c's localindex()), but dcl.c -- shared frontend
+code also used by every register-based backend -- resets its own
+autoffset counter to 0 right after walking a function's parameters,
+because on a real arch params and autos live in disjoint address
+ranges (FP+ vs SP-) and don't need to share a numbering space. ec
+does need them to share one, so localindex() shifts every CAUTO index
+by nparams to land right after the last param. The matching other
+half: el reads each Text's framesize (which, in ec's design, Aaut3
+makes count *locals* rather than bytes -- see align()'s comment) and
+emits it as a single local-decl entry in the function body's code
+section, so wasm actually reserves those extra slots instead of
+leaving them undeclared.
+
+String literals (OSTRING) and address-of for globals/statics: both
+turned out to already be almost entirely wired up by shared frontend
+code, needing only two small, arch-specific pieces. outstring()
+(ec/swt.c) is close to a verbatim port of ic/swt.c's (riscv): buffer up
+to NSNAME bytes into the shared `.string` blob (symstring, wired up
+once in cck/lex.c) and flush each full chunk as an ADATA record, using
+`p->reg` to carry the chunk's byte count -- not `p->from.scale` (6c's
+convention): ec's Adr has no scale field, and el/obj.c's ADATA reader
+already expects the count in `reg` (outcode()'s generic 3rd-argument
+slot), matching every other ADATA-emitting backend without a scale
+field either. gclean() (ec/txt.c) already had the matching flush-and-
+GLOBL-emit logic in place from the start (modeled on every other
+arch's gclean()), so this alone was enough for string literals to
+work end to end. Address-of: cck/com.c's generic array-to-pointer
+decay already wraps a string literal (or any array) in an OADDR node
+when used where a pointer is expected -- ec just needed a `case
+OADDR:` in cgen.c's rval() to handle it, and for a global/static ONAME
+that's exactly what gaddr() (ec/txt.c) already did (it predates this
+session, written for OAS's own "address first" sequencing) -- pushes
+the naddr()-computed D_OREG/D_STATIC-or-D_EXTERN address, retagged to
+D_CONST, the same trick ea/a.y's own pushaddr() uses for `$msg(SB)`.
+Address-of a *local* still diag()s in the general case (needs the
+shadow-stack redesign below, not yet started) -- except for one
+specific, narrower case that's now done: a variadic function's own
+named parameter (e.g. printf's `s`, in `&s+1`). See the variadic-call
+ABI section further down for why that case turned out not to need the
+general redesign at all.
+
+A real bug found while building on top of this (tests/c/mini2/
+hellowrite_wasm.c, see its own comment): ea's `STOREx addr` convenience
+form (a.y's pushaddr()-fused grammar rule, symmetric with `LOADx addr`)
+emits the address-push instruction *at that line*, immediately before
+the store opcode -- correct only when the value being stored is also a
+bare immediate pushed by that same line. When the value instead comes
+from an earlier, separate instruction (a LOCALGET of a real argument,
+say -- exactly the shape any real store, hand-written or ec-compiled,
+normally has), the fused form gets the stack order backwards: it ends
+up as [value, address] instead of the [address, value] a real
+i32.store needs (e.out.h's own ALOADx/ASTOREx comment says address is
+always evaluated first). There is no way to fix this from inside one
+bison reduction -- the address-push and the value-push are two
+different lines' worth of emitted code, in the order those lines
+appear, and pushaddr() always runs at the STORE line, after whatever
+came before it. This had gone uncaught because no test exercised
+STOREx with a non-constant value -- el/asm.c's own top comment
+correctly flagged loads/stores as implemented-but-unverified. Confirmed
+empirically (a hand-assembled STOREW writing a runtime value produced
+0x00 instead of the stored byte, matching "address ends up written
+into where the value should have been read from") before fixing it, to
+avoid chasing a theory that happened to be wrong. Fixed by adding a
+second, un-fused STORE form -- `STOREW $0` -- that emits only the bare
+opcode with a literal memarg offset, taking both operands from
+whatever the caller already pushed in whatever order it chose (kept
+alongside, not replacing, the `addr` form, which is still correct for
+LOAD and for a constant-valued STORE). Regression test:
+tests/s/mini/storeorder_wasm.s, which builds the same "Hello,
+world\n" every other hello_*.exe in that directory checks, one byte at
+a time through a runtime STOREB (via a genuine CALL boundary, so the
+value truly arrives via LOCALGET, not folded away by anything) instead
+of DATA -- a regression here fails exactly like a silently-wrong hello
+program would, not just a narrow assertion.
+
+A second, smaller gap found in the same effort: a hand-written .s TEXT
+called from ec-compiled C needs a real (non-void, non-nullary)
+signature for the wasm validator's call-site type check to pass, but
+ASIGNATURE (see e.out.h's own comment) was ec-only -- nothing let
+hand-assembly declare one. Fixed by adding a `SIGNATURE sym(SB),
+$"sig"` directive to ea (a.y/lex.c), reusing ASIGNATURE and el/obj.c's
+existing reader verbatim (it already handled ASIGNATURE from either
+source, having never actually checked who emitted it) -- purely an
+assembler-side addition, no linker changes needed. tests/c/mini2/
+wasi_wasm.s's write() (wrapping the WASI fd_write import into libc's
+write(fd,buf,n) shape, the wasm counterpart of linux_amd64.s/
+macos_amd64.s/windows_amd64.s) is the first real user, and doubles as
+its test.
+
+
+Pointer dereference, inc/dec, compound assignment
+--------------------------------------------------------------------
+
+A follow-on session tried to build tests/c/mini2/helloprintf.wasm from
+the *unmodified* shared sources (helloprintf.c, print_nofloat_no64.c,
+test.c -- the same files every real arch already builds byte-for-byte
+against the same helloprintf.expected.txt), rather than a wasm-specific
+fork like hellowrite_wasm.c. Doing so turned up several ec/cgen.c gaps
+that nothing in the existing wasm test suite happened to exercise
+(every test so far was, unknowingly, written to avoid them):
+
+  - OIND (`*p`), both read (rval()'s case) and write (cgen()'s OAS
+    case, address-before-value ordering via rval(n->left->left) rather
+    than gaddr(), since there's no symbol/offset to fold into a
+    link-time constant for an arbitrary pointer expression).
+  - OPOSTINC/OPOSTDEC/OPREINC/OPREDEC and the whole OASADD/OASSUB/
+    OASMUL/OASLMUL/OASDIV/OASLDIV/OASMOD/OASLMOD/OASAND/OASOR/OASXOR/
+    OASASHL/OASASHR/OASLSHR family, e.g. vprintf's `p++`, printhex's
+    `--i`, printhex's `v /= 16`. Only an ONAME lvalue is implemented
+    for either family (matches the shared sources' own usage -- never
+    `*p` or `a[i]`); a more general lvalue diag()s. Both reuse the
+    same "no dup in wasm MVP" idiom already established elsewhere:
+    ALOCALTEE for the local case (a real wasm instruction: store and
+    leave a copy, no re-fetch needed), a second lload() for the
+    non-local case (re-fetch instead of duplicating).
+  - Chained/nested assignment used as a value (`lp = p = s;`, parsed
+    as OAS(lp, OAS(p, s))) -- rval() had no case for OAS at all (only
+    cgen()'s own top-level dispatch handled it), so an inner assignment
+    reached rval()'s generic `default: diag()`. Fixed with one line:
+    `case OAS: cgen(n, &stackresult); return;` in rval(), delegating
+    to cgen()'s already-correct OAS sequencing (whose own "no dup"
+    tail already means "leave the assigned value on the stack" when
+    called with nn == &stackresult -- exactly rval()'s contract).
+
+A genuine, previously-latent bug found in the process: gaddr()
+(pushes a C global/static's address as an ACONSTW) never updated
+p->height or stackheight, unlike every other instruction-emitting
+helper. Harmless as long as every caller immediately followed it with
+another gins() call whose own bookkeeping happened to leave the *net*
+effect looking right by the time anything downstream (reg.c's
+structuring pass) inspected it -- true of both existing callers
+(lload()'s global-read path, OAS's non-local write path). Using
+OADDR as a *bare call argument* (cgen.c's OFUNC/gargs() path) has no
+such follow-up instruction to absorb the omission, so stackheight
+stayed permanently one low from that point on, and reg.c's structuring
+pass corrupted the block/loop nesting it emitted downstream. Confirmed
+via a minimal repro (a 2-arg call whose first argument is `&global`)
+that failed wasm validation with "not enough arguments for call"
+before fixing it. Regression test: tests/c/mini2/regress_wasm.c's
+deref() (its call site passes `&gscratch` as a bare argument, exactly
+the repro shape).
+
+
+The variadic-call ABI
+--------------------------------------------------------------------
+
+The actual hard part of a real printf(): wasm's `call` instruction is
+arity- and type-checked against the callee's declared signature --
+there is no way to just push extra values onto the stack the way a
+real ISA's own calling convention would let a variadic call site do.
+`printf(fmt, true)` can't even validate: `printf`'s own wasm type
+would have exactly 1 param (nparams only counts *named* params --
+dcl.c's walkparam() treats the "..." token itself as a no-op), but the
+call site would try to push 2 values.
+
+The fix is the same one every real-world wasm C compiler already
+uses (LLVM's wasm32 target, Emscripten): every actual argument to a
+variadic call -- named params *and* "..." actuals alike -- gets
+written into a small buffer reserved on the shadow stack (see "What a
+shadow stack actually is" above), and the call passes exactly one
+wasm argument: the buffer's base address. This is deliberately not a
+general "any local can be address-taken" redesign (see the "Open
+questions" entry below, still not started) -- it only has to make ONE
+specific thing addressable: a variadic function's own named
+parameter(s), which is exactly the shape `&s+1` needs and nothing
+more. A variadic function's own *autos* (e.g. printf's `byte *arg;`)
+are unaffected, still ordinary fast wasm locals.
+
+Detection: `int isvariadic(Type *t)` (txt.c) walks `t->down` for a
+TDOT node -- confirmed this is how "..." is represented (dcl.c's
+fnproto1()'s ODOTDOT case returns `typ(TDOT, T)`, terminating the
+param chain; tmerge() already relies on the same TDOT check when
+merging a forward declaration against a definition). Called on
+`thisfn` (the function being compiled) and on a call site's callee
+type (`l->type` in cgen.c's OFUNC case) -- both sides see the same
+TDOT via minilibc.h's shared `extern void printf(char *s, ...);`
+declaration.
+
+Callee side (txt.c):
+  - gpseudo()'s ATEXT case forces the emitted ASIGNATURE to exactly 1
+    param ('W', the incoming pointer) + result, via a new
+    `wasmnparams()` helper (`isvariadic(thisfn) ? 1 : nparams`) instead
+    of looping nparams times.
+  - localindex()'s auto-shift uses wasmnparams() instead of nparams,
+    so autos in a variadic function are indexed right after the *real*
+    wasm param count (1), not after however many *named* C params
+    there are.
+  - islocal() excludes a CPARAM when isvariadic(thisfn) -- such a
+    param no longer lives in a real wasm local at all. The complement,
+    isvarargparam(), is true for exactly that case.
+  - A synthetic sentinel Node, argptrnode (exposed via nodargptr()),
+    represents wasm local 0 -- every variadic function's *sole* true
+    wasm param. Deliberately built as a plain CPARAM ONAME with
+    xoffset 0, so naddr()'s existing ONAME/CPARAM case (D_LOCAL via
+    localindex()) already does the right thing with zero new
+    naddr()/e.out.h plumbing.
+  - lload() and cgen.c's OADDR case both grew an isvarargparam()
+    branch: read pushes the pointer then loads at memarg offset
+    4*n->xoffset (one 4-byte slot per named param, matching this
+    bootstrap's "one slot per value" convention throughout); address-
+    of pushes the pointer and adds the same offset if nonzero (0 for
+    printf's own `s`, its only named param). Assignment *to* a vararg
+    param is left diag()'d in both cgen()'s OAS case and asop()/
+    incdec()'s own isvarargparam() guards: print_nofloat_no64.c never
+    assigns to `s`, and asop()/incdec()'s ordinary non-local branch
+    would otherwise silently mis-address it via gaddr() (which only
+    knows CSTATIC/CEXTERN/CGLOBL).
+
+Caller side (cgen.c's OFUNC case, callvariadic()): when
+isvariadic(l->type), instead of the ordinary gargs()+ACALL sequence:
+  1. Count actual arguments (countvariadicargs(), an OLIST walk mirroring
+     gargs()'s own recursion), size = 4*count.
+  2. Reserve shadow-stack space: GLOBALGET(SP); CONSTW size; SUBW;
+     GLOBALSET(SP) -- a new gspglobal(int) helper (txt.c), hand-built
+     exactly like gaddr() rather than through gins()+a Node/naddr(),
+     since there's no existing Node shape for "the SP global" (SPGLOBAL
+     is a D_GLOBAL, not a D_LOCAL like nodargptr() could piggyback on).
+  3. For each actual argument, in order (storevariadicargs()):
+     GLOBALGET(SP); <evaluate the argument>; STOREx $(4*i) -- literally
+     the same STOREx-with-a-bare-memarg-offset sequencing already
+     proven correct by the earlier storeorder_wasm.s regression test.
+  4. Push the base address once more (the call's sole wasm argument),
+     ACALL, restore stackheight the same "before + (result?1:0)" way
+     the ordinary path already does.
+  5. Restore SPGLOBAL (+= size) *after* the call returns, not before
+     -- the callee reads this memory during the call.
+
+No `el`/`ea` changes needed for any of this -- AGLOBALGET/AGLOBALSET/
+ASTOREx-with-offset/AADDW/ASUBW were all already implemented and
+tested (SP already used, and even the SP itself needed a fix -- see
+below).
+
+A real, previously-latent linker bug found while testing this:
+SPGLOBAL (linkers/el/asm.c) was initialized to `arenaend` -- the
+*bottom* of the free memory region (just past the last byte of static
+data) -- not its top. A stack that's about to be *decremented* to
+reserve space needs to start high and grow down into free memory;
+starting at arenaend instead means every reservation immediately
+underflows backward into the static data section itself, and for
+anything bigger than a couple of words, past address 0 entirely,
+wrapping to a huge unsigned offset. Confirmed via a minimal repro (a
+3-actual-argument variadic call) that failed with a wasm "memory
+access out of bounds" trap; 1- and 2-argument calls happened to still
+fit in the gap between ARENABASE and arenaend by accident, which is
+why this went unnoticed until a 3rd argument pushed the reservation
+past it. Nothing before this used SPGLOBAL as a real stack pointer
+(ea's own $SP addressing exists but had zero test coverage either).
+Fixed by initializing SPGLOBAL to the top of the single fixed-size
+linear memory page the module already declares (a new WASMPAGESIZE
+constant), matching every real wasm toolchain's own convention (data
+grows up from the bottom, the stack grows down from the top).
+Regression test: tests/c/mini2/regress_wasm.c's sumvariadic().
+
+A second, more subtle bug found in the same effort, in ec's own
+gpseudo() (txt.c): ASIGNATURE is emitted as a *second* Prog created
+right after ATEXT's own Prog, inside the same gpseudo(ATEXT, ...)
+call (see the SIGNATURE-directive section above for why it lives
+there). But codgen() (the shared cck/pgen.c) does `gpseudo(ATEXT,
+...); sp = p;` immediately afterward, expecting the global `p` to
+still be the ATEXT Prog it just asked for -- true for every other
+arch's own gpseudo()/gtext(), none of which emit a second Prog inside
+the same call, but silently broken here since nextpc() (called again
+for ASIGNATURE) reassigns `p` out from under the caller. codgen()'s
+own later `sp->to.offset += maxargsafe` -- its mechanism for folding
+regsalloc()'s scratch-local reservations (see swit1() below) into the
+ATEXT frame size -- was therefore silently mutating the *ASIGNATURE*
+Prog's unused to.offset field instead of the real frame size. Harmless
+as long as maxargsafe was always 0, true of every function until
+swit1() became the first thing in ec to ever call regsalloc() --
+which is exactly what surfaced it, as a wasm "invalid local index"
+validation failure (the scratch local's index was never actually
+declared). Fixed by saving the ATEXT Prog (`ptext`) before emitting
+ASIGNATURE and restoring `p = ptext` before gpseudo() returns.
+
+
+Switch/case
+--------------------------------------------------------------------
+
+doswit() (case/default value collection, sorting, dispatch-shape
+selection) is already fully generic, shared in cck/pswt.c -- only
+swit1() (the actual compare-and-branch emission) is ec's to provide,
+and it was a stub diag() until this session.
+
+The one real wrinkle: by the time swit1() runs, doswit() has already
+cgen()'d the switch expression, so its value is sitting on the wasm
+operand stack -- but swit1() needs to compare that *one* value against
+up to nc different case constants, and an operand-stack value can
+only be consumed once (no dup in wasm MVP, same limitation as
+everywhere else in this backend). Fixed by immediately spilling it
+into a freshly reserved scratch wasm local via regsalloc() (txt.c;
+see below) -- unlike the operand stack, a local can be read back as
+many times as needed. Each case then becomes "push scratch; push the
+case constant; i32.eq; br_if to that case's label" -- q[i].label is
+already a concrete, resolved pc by this point (the case body was
+emitted earlier, by doswit()'s own gen(n->right) call, *before* the
+switch expression is even evaluated), so patch() can target it
+immediately rather than being deferred the way an ordinary if/while/
+for's own gbranch() placeholders are.
+
+regsalloc() itself (txt.c) is ported from ic/6c's own regsalloc() --
+same cursafe/curarg/maxargsafe/stkoff globals every backend already
+has (cc.h/gc.h), same align()-based offset computation (against ec's
+own align(), whose Aaut3 case hands out a flat +1 per call rather than
+a byte width, so this reserves one wasm local per call). codgen()
+(cck/pgen.c) already folds maxargsafe into the ATEXT frame size *after*
+gen() finishes, which is what lets this be called from deep inside
+statement codegen despite ATEXT already having been emitted with the
+"final" auto count by then -- the exact mechanism ic/6c already rely
+on for their own regsalloc() calls (e.g. ic/cgen.c's indirect-call
+spill). (Finding and fixing this mechanism's own latent gpseudo() bug
+is what made regsalloc() actually work -- see above.)
+
+A switch used standalone works and is tested (regress_wasm.c's
+classify_switch()); switch *inside* a loop that also has its own
+backward branch (e.g. a `continue`) -- print_nofloat_no64.c's own
+vprintf() shape, `for(...) { ...continue... switch(...){...}
+switch(...){...} }` -- used to be a real, confirmed relooper-class
+limitation (buildscopes() misclassifying the switch's own backward
+case-dispatch branches as the loop's back-edge) and is now fixed by
+hoistswitches() below; regress_wasm.c's loopswitch() tests exactly
+this shape.
+
+hoistswitches() (reg.c) -- fixing switch-inside-a-loop without a
+full relooper
+--------------------------------------------------------------------
+
+The root cause (recapped from the old "Open questions" entry this
+replaces): doswit() always emits a switch as *body first* (case labels
+recorded inline as gen() walks it), *dispatch chain after* -- swit1()'s
+own compare-and-branch sequence, described above, always lands
+physically after the case bodies it jumps into, making every
+q[i].label branch a *backward* one. That's merely redundant (a wasm
+`loop` that only ever runs once still validates) for a standalone
+switch, but breaks when the switch sits inside a real loop that has
+its own backward back-edge landing in the same region: two wasm `loop`
+scopes can only ever *nest*, never partially overlap (unlike two
+`block` scopes, extendscopes() has no equivalent of widening a loop's
+open point -- a loop's open *is* its own branch target, not a movable
+marker), and a switch's dispatch span and an enclosing loop's own span
+overlap rather than nest whenever the switch isn't the very last thing
+in the loop body. validatescopes() catches the shape it was written
+for (a `for`/`do while`'s own entry landing mid-loop) with a clean
+diag(), but does *not* catch this one -- confirmed the hard way, via
+print_nofloat_no64.c's vprintf(): it silently miscompiled into a
+module that failed wasm *validation* ("expected 0 elements on the
+stack for fallthru, found 1"), not a clean ec-side diagnostic. (Finding
+that also surfaced two unrelated real bugs along the way, both below:
+the ADATA/AGLOBL pcid bug, and the wasi_wasm.s write() signature
+mismatch -- each was masking or compounding the picture until fixed
+independently.)
+
+The fix does *not* generalize reg.c into a real relooper (Emscripten's
+algorithm, or LLVM's CFGStackify) -- that's still open for genuinely
+irregular control flow (arbitrary goto), see "Open questions". Instead
+it eliminates the *specific* conflict at its source: swit1() (swt.c)
+now also computes and records, via a new recordswitch() (reg.c):
+  - `bodystart` -- the switch's own earliest case label (`min` over
+    `q[i].label`, deliberately *not* including `def` when there's no
+    `default:`: doswit() sets def=breakpc then, a raw pc captured
+    *before* the body even starts, i.e. always smaller than every real
+    case label and not a body position at all -- would always
+    incorrectly win the minimum. A switch whose `default:` physically
+    comes before every other case would need `def` included too; none
+    of this backend's test sources do that, so it's a known, narrow
+    gap rather than guessed at).
+  - `displo`/`disphi` -- swit1()'s own first and one-past-last
+    instruction (the scratch-local spill through the final
+    unconditional branch to `def`).
+reg.c's new hoistswitches() (regopt(), between retarget() and
+rotateloops() -- must run before rotateloops() so a switch's former
+backward branches never reach findrotation()/buildscopes() at all)
+then, per recorded switch belonging to the function being processed:
+  1. Recovers the dispatch chain's *true* start (`d0`): `displo` is
+     swit1()'s own first instruction, not cgen(l,&nod)'s (the switch
+     expression's own evaluation, emitted from cck/pgen.c's OSWITCH
+     case, a hook this file has no access to). Recovered instead via
+     the same technique safeopen() already uses for the analogous
+     "where did this run of code start" question: a statement always
+     begins at operand-stack height 0, so the nearest position at or
+     before `displo` with height 0 is exactly where the switch
+     expression's evaluation began.
+  2. Physically swaps the two adjacent spans [bodystart,d0) ("body")
+     and [d0,d1) ("dispatch") in place (swapspans()) -- deliberately
+     simpler than rotateonce() (no special-cased trailing instruction
+     retargeted to the span's own start: there's no automatic "loop
+     back-edge" here, just two blocks trading places and every branch
+     target that fell inside either one following along via the same
+     remap[] trick).
+This turns every q[i].label branch (and the final unconditional branch
+to `def`) into an *ordinary forward* branch into the (now relocated)
+body -- exactly what buildscopes() already handles for every other
+if/while/for -- eliminating the conflict entirely instead of trying to
+reconcile two overlapping loop scopes. OSWITCH's own entry jump
+(cck/pgen.c, `gbranch(OGOTO); sp=p; ...; patch(sp,pc);`) needs no
+special handling either way: after the swap it simply becomes "branch
+to the very next live position", a degenerate but valid one-instruction
+block, and is often not even a *live* instruction any more by this
+point (e.g. print_nofloat_no64.c's two back-to-back switches: the
+first one's own dispatch already jumps straight to breakpc, which *is*
+the second switch's true start, so its own now-redundant entry jump
+never survives markdead()/compact() -- which is exactly why
+hoistswitches() locates a switch's body via its own case labels
+(bodystart), never by searching for "the branch targeting the
+dispatch": on a function with several switches sharing convergent
+targets, that search can find the *wrong* live branch instead of
+finding nothing, corrupting an unrelated span silently).
+
+Multiple switches in one function (vprintf() has two, sequential) are
+each hoisted independently, in whatever order recordswitch() received
+them: curpos[] (hoistswitches()' own "where does original pcid X
+currently live" table, seeded from compact()'s liveidx[]) is kept in
+sync by every swapspans() call, so a later switch's endpoints are
+always looked up fresh rather than computed once from now-stale
+positions -- the same reason rotateloops() re-scans the live array
+from scratch on every iteration instead of precomputing everything
+up front.
+
+Two more real, independent bugs found while chasing this (both fixed,
+neither wasm-hoisting-specific):
+
+  - gpseudo()'s `if(a == ADATA || a == AGLOBL) pc--;` (txt.c), copied
+    verbatim from ic/txt.c's own gpseudo() (this file's own stated
+    reuse-what-transfers philosophy): harmless there since a real
+    arch's regopt() never indexes anything by raw pcid, but wrong for
+    ec specifically, whose reg.c *does* (collect()/resolve() index
+    `list[target-base]`, needing every Prog's pcid dense and unique).
+    A string-literal call argument's ADATA (com.c's OSTRING case, via
+    outstring()) is emitted *while* the enclosing function's own
+    statements are being walked (not as a separate pass), so it
+    becomes one more Prog in that function's own flat list -- `pc--`
+    duplicated its pcid onto whatever Prog came right after it (e.g.
+    the ACONSTW pushing the string's address for a call argument),
+    desyncing every later index in that function from its true pcid by
+    one. Confirmed via a minimal repro: a `for` loop containing two
+    `switch`es, preceded by a call passing a string literal (e.g.
+    `debug("x")`), miscompiled into a genuine cyclic branch chain
+    (reg.c's resolve() diag "cycle in branch chain") -- exactly
+    vprintf()'s own shape (its very first statement is `debug("VPRINTF")`).
+    Fixed by dropping the `pc--` special case entirely for ec (see
+    txt.c's own comment) -- the same reasoning ASIGNATURE already got
+    right (gc.h's comment, further up): top-level AGLOBL/ADATA
+    (gclean()'s end-of-file loop, gextern()'s globals) never reach
+    regopt() at all, so leaving those dense too costs nothing.
+
+  - wasi_wasm.s's write() declared `SIGNATURE write(SB), $"WWWW"` --
+    3 i32 params *plus* an i32 result (el/asm.c's own sig-string
+    convention: the last char is the result type, 'V' for none) -- to
+    "pretend success" for hellowrite_wasm.c's own separate `extern int
+    write(...)` prototype. But minilibc.h (what print_nofloat_no64.c
+    actually compiles against) declares `extern void write(...)` --
+    void. ec's cgen() (cgen.c's OFUNC case) decides whether a bare
+    call-statement needs a wasm DROP purely from the *caller's*
+    declared C return type, not the callee's real wasm signature, so
+    every void-prototyped write() call left write()'s real i32 result
+    genuinely un-dropped on the operand stack -- harmless wherever
+    something else's own codegen happened to consume/absorb the stray
+    value, a hard wasm validation failure ("expected 0 ... found 1")
+    for any function whose write() call was its last statement (e.g.
+    ·printbool()/vprintf()). Fixed by matching wasi_wasm.s's SIGNATURE
+    to what minilibc.h actually promises ("WWWV", genuinely void) and
+    updating hellowrite_wasm.c's own local prototype to match (it was
+    already effectively unused -- nothing ever read write()'s "pretend
+    success" value either way).
+
+
+Initialized global/static data, and el's per-file D_STATIC scoping --
+getting tests/c/mini2/helloprintf_wasm.wasm to actually run
+--------------------------------------------------------------------
+
+A follow-on session closed the two gaps the previous paragraph used to
+list as blocking a real, fully-linked printf() test (see git history
+around "helloprintf_wasm.wasm" for the commit). Result: tests/c/mini2/
+helloprintf_wasm.c + print_nofloat_no64.c (unmodified) + wasi_wasm.s
+now link and run correctly, output verified byte-for-byte against
+helloprintf_wasm.expected.txt via test_wasm -- see that mkfile recipe
+and helloprintf_wasm.c's own comment. Both fixes, in the order they had
+to land (the first was a prerequisite to even reach the second):
+
+  - ec's gextern() (swt.c) now emits real ADATA for a static's
+    initializer instead of no-oping it. Two shapes, both needed by
+    print_nofloat_no64.c and both this bootstrap supports (no vlong,
+    matching that file's own "no64" name):
+      - `n->op == OCONST` (`static int32 fd = 1;`): a bare
+        `gpseudo(ADATA, s, nodconst((int32)n->vconst))`, with
+        `p->from.offset` bumped by gextern()'s own `off` parameter and
+        `p->reg` set to the initializer's width -- el/obj.c's ADATA
+        reader already knew how to write a plain D_CONST value in
+        (`to.type==D_CONST && to.sym==S`); it had just never been fed
+        one by ec before now.
+      - `n->op == ONAME` (`static int8 *dig = "0123456789abcdef";` --
+        cck/dcl.c's init1() already strips the OADDR a string literal
+        decays to before calling gextern(), leaving exactly an ONAME of
+        class CSTATIC, sym==symstring, xoffset==the literal's offset in
+        the shared `.string` blob): emit the same ADATA shape but with
+        `p->to.type=D_CONST, p->to.sym=n->sym, p->to.offset=n->xoffset`
+        -- el/obj.c's ADATA reader already turns exactly this shape
+        (`to.type==D_CONST && to.sym!=S`) into a DataReloc, the same
+        deferred-symbol-address-patch mechanism a hand-written `DATA
+        iov+0(SB)/4, $msg(SB)` already went through (see "el: a
+        single-pass linker" above) -- again, already correct on el's
+        side, just never reached from ec's gextern() before.
+    One thing dropped, not added: the old stub's unconditional
+    `gpseudo(AGLOBL, s, &nod)` (sized from `w`, the *initializer
+    chunk's* width) was redundant and, for anything wider than a
+    scalar, wrong -- gclean()'s own end-of-file loop already emits
+    exactly one correctly-sized AGLOBL (from `s->type->width`) for
+    every CGLOBL/CSTATIC symbol, initialized or not. Matches
+    compilers/ic/swt.c's own gextern(), which never touches AGLOBL
+    either.
+
+  - el (linkers/el/obj.c, linkers/el/l.h) now scopes D_STATIC symbols
+    per input file instead of merging every symbol, regardless of
+    storage class, into one bare-name-keyed global hash. This was a
+    real, previously-latent bug, confirmed via a minimal repro before
+    the fix (two small ec-compiled objects, each with its own distinct
+    string literal, corrupted both on link -- reading one file's
+    literal yielded bytes from the other's `.string` blob) -- only
+    surfaced now because no earlier wasm test linked two files that
+    each contain their own string data (hellowrite_wasm.e + wasi_wasm.e
+    was the only prior multi-file link, and wasi_wasm.s has no string
+    literals of its own). Fixed the same way every other arch's own
+    linker already solves this (see linkers/6l/obj.c's `version`/
+    `lookup(name, v)`): Sym grew a `version` field, `lookup()` takes a
+    version number and matches on `(name, version)` instead of `name`
+    alone, `readobj()` bumps a global `version` counter once per input
+    file and looks up an ANAME record's symbol with that file's version
+    when the record's own `name` field (already carried in the wire
+    format, per-occurrence) is D_STATIC, or with version 0 (meaning
+    "the one shared, cross-file namespace") otherwise -- so a D_EXTERN/
+    D_STATIC-vs-D_EXTERN CALL/GLOBL reference between files still
+    resolves to the *same* Sym (required for cross-file calls to work
+    at all), while two files' own same-named D_STATIC symbols become
+    two distinct Sym's. asm.c's one other lookup() call site
+    (`lookup("_start")`, always a global symbol) was updated to pass
+    version 0 to match.
+
+
+A function's real ASIGNATURE, el's per-import signatures, and
+panic()/exit() -- getting the real helloprintf.c (+ test.c) running
+--------------------------------------------------------------------
+
+A follow-on session went from tests/c/mini2/helloprintf_wasm.wasm's
+earlier scope (a wasm-specific stand-in main() + print_nofloat_no64.c)
+to linking the exact, unmodified helloprintf.c + test.c +
+print_nofloat_no64.c -- the same three files every other arch already
+compiles byte-for-byte -- with output verified against the one shared
+helloprintf.expected.txt. Four things needed fixing/adding, discovered
+in this order (each test failure pointed at the next gap):
+
+  - ec's ASIGNATURE builder (txt.c's gpseudo(), ATEXT case) hardcoded
+    every param and the result to 'W' (i32) regardless of the C
+    function's real type. Harmless as long as nothing returned or took
+    a non-i32-shaped value, until test.c's `float64 test_float(void) {
+    return 2.2; }` needed a real 'D' result. Fixed with a new
+    sigchar(Type*) helper (txt.c) -- reusing cck/sub.c's typefd[]/
+    typev[] classification tables (already how the shared frontend
+    tells float/double/vlong/everything-else apart, see gextern()'s
+    own reuse of the same tables below) -- and walking `thisfn->down`
+    (the function Type's own param-type chain; the same chain
+    isvariadic() already walks looking for a trailing TDOT, and dcl.c's
+    `t->down = fnproto(n)` is where it's built) to compute each
+    param's real sig char, plus thisfn->link's for the result. A
+    variadic function's own signature is unchanged by this (still
+    forced to "one 'W' param", see the variadic-call-ABI section above
+    -- its true wasm param is always the synthetic argptrnode pointer,
+    never shaped by its C params at all). Nothing else needed touching:
+    cgen.c's rval() already special-cased OCONST float constants
+    (`gins(ACONSTF/ACONSTD, ...)`) and txt.c's stackdelta() already
+    tracked ACONSTF/ACONSTD/ADROP/ACALL as type-agnostic (wasm's own
+    `drop` and the operand-stack height reg.c tracks don't care about
+    *which* value type, only that there is one) -- both were already
+    correct, just never reachable through a correctly-signed ATEXT
+    before this fix. Confirmed via a minimal repro (a function
+    returning a float64 constant, called and its result discarded)
+    before wiring it into the real test.c.
+
+  - ec's gextern() grew a second OCONST shape: typev (vlong/uvlong)
+    statics, needed by test.c's `static uint64 uvnan =
+    0x7FF0000000000001ULL;` (unused at runtime but still walked by
+    gclean()'s own end-of-file GLOBL loop and gextern()'s initializer
+    dispatch regardless). D_CONST's own wire encoding (swt.c's
+    outopd()) is only ever 4 bytes, so -- exactly compilers/ic/swt.c's
+    own gextern(), which has the identical constraint -- a vlong
+    initializer splits into two 4-byte ADATA writes via nod32const()
+    (already implemented in txt.c, just unused until now), low half at
+    the static's own offset and high half 4 bytes further in.
+
+  - Real archs' own linux_amd64.s/macos_amd64.s/windows_amd64.s/etc.
+    already define panic() (ignore its argument, exit(0)) precisely
+    because print_nofloat_no64.c's vprintf() unconditionally
+    references it (`case '!': panic(-1);`) and every arch's linker
+    requires every referenced symbol to resolve even though nothing in
+    helloprintf.c's own format strings ever reaches that case at
+    runtime -- exactly the same shape helloprintf_wasm.c's own removed
+    panic() stub used to paper over locally. wasi_wasm.s grew the same
+    definition (calling its own new exit(), see next bullet), matching
+    every other arch's own convention of keeping panic() in the OS-
+    runtime shim, not the portable print library.
+
+  - exit() needed a second WASI import, proc_exit(rval: i32) -> (),
+    genuinely divergent at runtime (the host terminates the instance)
+    but still needing a normal RET afterward so the wasm function
+    itself validates structurally (there's no "noreturn" concept at the
+    module level). This exposed a real, previously-unnoticed limit:
+    el's import machinery (asm.c) had exactly one hardcoded signature
+    for *every* `-I` import (IMPORTSIG = "WWWWW", the shape WASI's
+    fd_write happens to need) -- fine as long as fd_write was the only
+    import anything ever used, wrong the moment a second import needed
+    a different shape. Fixed by giving `-I` an optional `:sig` suffix
+    (`-I symbol=module.field[:sig]`, l.h's Import gained its own `sig`
+    field, defaulting to the old hardcoded shape when omitted so every
+    pre-existing `-I fd_write=...` invocation keeps working unchanged)
+    and having asm.c register each import's own signature into the
+    type table instead of a single shared one. One real ordering bug
+    surfaced while doing this: wasm requires module sections in
+    increasing id order, and an early version of this fix accidentally
+    emitted the import section (id 2) before the type section (id 1)
+    it depends on, since it's the import loop that discovers most
+    signatures -- fixed by registering every signature (Texts' and
+    Imports' alike) into sigtab *before* emitting either section, so
+    the type section can still be written first while carrying entries
+    the import section will reference.
+
+  - A genuinely separate, non-obvious consequence of el's "no dead-code
+    elimination, must resolve every symbol referenced by every linked
+    object file" design (see "el: a single-pass linker" above): once
+    wasi_wasm.s's exit() (referencing proc_exit) is linked in at all,
+    *every* consumer of wasi_wasm.e needs `-I proc_exit=...` declared,
+    even tests/c/mini2/hellowrite_wasm.wasm, whose own C code never
+    calls exit(). el links a whole object file's Text list, not
+    individual reachable functions -- exit()'s own `CALL proc_exit(SB)`
+    stays an unresolved reference for any link that includes it,
+    reachable from _start's control flow or not. Confirmed the hard
+    way: hellowrite_wasm.wasm's link started failing with "undefined
+    symbol: proc_exit" purely as a side effect of wasi_wasm.s growing
+    exit()/panic(), with no change to hellowrite_wasm.c itself. Fixed
+    by adding the same `-I proc_exit=...` to that recipe too (mkfile).
+
+  - A smaller, unrelated mkfile hygiene issue found while chasing the
+    above: tests/c/mini2/mkfile used to have `ea wasi_wasm.s` repeated
+    inside both hellowrite_wasm.wasm's and helloprintf_wasm.wasm's own
+    recipes, each producing the same wasi_wasm.e as one of their own
+    steps rather than as a real, shared mk target. mk can run
+    independent recipes in parallel ($NPROC, see env.sh) -- and does,
+    at this project's own default -- so two recipes both writing the
+    same output file outside mk's own dependency tracking is a latent
+    race regardless of whether it was the actual cause of any one
+    observed failure here (one `mk test_wasm` run, while still missing
+    the hellowrite_wasm.wasm `-I proc_exit` fix above, also left a
+    corrupted regress_wasm.wasm behind -- consistent with, though not
+    conclusively pinned on, the batch aborting mid-write during
+    parallel execution). Fixed regardless, on general principle: giving
+    wasi_wasm.e its own mk target and listing it as an ordinary
+    prerequisite from both recipes instead of building it inline lets
+    mk's own dependency graph build it once and serialize correctly --
+    the general fix for any shared intermediate file two independent
+    recipes both need, race observed or not.
+
+
+Open questions for ec (not yet started)
+-------------------------------------------
+
+This is the part of the design that reaches furthest past what
+exists today, kept here so it doesn't have to be re-derived:
+
+  - Should ec ever need genuinely irregular control flow (arbitrary
+    goto into another block, computed jumps) -- reg.c's scope-based
+    approach would still need to become a real "relooper" (Emscripten's
+    algorithm, or LLVM's CFGStackify) instead of the direct
+    construction it does today. The one case that used to force this
+    question (switch inside a loop with its own backward branch,
+    print_nofloat_no64.c's vprintf()) turned out *not* to need the full
+    generalization -- see "Switch/case"'s hoistswitches() above, which
+    resolves it with a narrower, targeted physical-relocation pass
+    instead. This bullet is only still open for something reaching
+    *further* than that (arbitrary/computed goto); nothing in the
+    shared test sources needs it yet.
+
+  - The address-taken-local split, general case. Address-of a global/
+    static is done (cgen.c's OADDR case, see above); address-of a
+    variadic function's own named parameter is *also* done now (the
+    variadic-call-ABI section above) -- but that's a narrower, caller-
+    allocates-the-buffer mechanism specific to varargs, not the general
+    redesign this bullet is about. What's still open: e.out.h's
+    D_AUTO/D_PARAM already reserve the concept for an *ordinary*
+    function's own locals -- a C local/param whose address is never
+    taken compiles straight to a D_LOCAL (fast, a true wasm local, as
+    implemented today); one that is address-taken (or too large to fit
+    in a single wasm value type) needs a slot in the shadow stack
+    instead, addressed relative to SPGLOBAL the way D_AUTO/D_PARAM work
+    on every other arch. Deciding which case a given C variable falls
+    into is ec's job -- probably a pass very similar to how existing
+    backends already decide which C locals become register variables
+    versus stack-resident ones, just with a binary fast/slow split
+    instead of "how many registers are free". Nothing in
+    tests/c/mini2's own sources needs this yet: write()
+    (hellowrite_wasm.c) doesn't (wasi_wasm.s's wrapper builds its iovec
+    out of a private global, never the caller's own frame), and
+    printf() only ever takes the address of its own named parameter
+    (the variadic-ABI case, done), never of an ordinary local.
+
+    Confirmed as the concrete, sole blocker for tests/c/vlong/ and
+    tests/c/float/ (tried, not yet started, while looking at whether
+    those two directories' own helloprintf.c could reuse the same
+    unmodified-source approach as tests/c/mini2's): `ec -o x.e print.c`
+    against either directory's print.c fails immediately, at the exact
+    same three functions in both (they're otherwise-identical code --
+    tests/c/vlong/print.c's own top comment says "Same as ../float/
+    print.c but without float stuff") -- ·printuint()/·printint()/
+    ·printhex() each declare `byte buf[100];` as a genuine local array,
+    then index and pointer-arithmetic into it (`buf[i] = ...`, `(char*)
+    buf+i`), which is exactly the "array decays to an address" case
+    this bullet describes. Unlike this same trio of functions in
+    tests/c/mini2/print_nofloat_no64.c, which sidesteps the whole issue
+    by declaring `buf` as a *global* instead (see that file's own `byte
+    buf[100];` at file scope, with its own claude-tagged comment on
+    why) -- tests/c/vlong/ and tests/c/float/'s own print.c can't be
+    changed to match without breaking the "byte-identical to every
+    other arch's own unmodified copy" property that makes this
+    comparison meaningful in the first place. So getting either
+    directory running on wasm needs this bullet actually implemented,
+    not a narrower workaround. tests/c/float/'s float.c (float64tobits/
+    frombits, used by isNaN()/isInf()/NaN()) would be a second, separate
+    blocker past this one -- a `union {float64 f; uint64 i;}` local,
+    which needs the same real-memory-backed-local machinery this bullet
+    is about (unlike the AREINTQD/AREINTDQ opcodes already in e.out.h/
+    txt.c's stackdelta(), which reinterpret a value already sitting on
+    the operand stack -- not a substitute for a union's own memory
+    aliasing between two named fields).
+
+  - The shadow stack's actual push/pop sequence at a *function's own*
+    entry/exit (as opposed to a call site's, which callvariadic()
+    already does) isn't designed yet: SPGLOBAL would need to be
+    decremented by the frame's shadow-stack size on entry and restored
+    on exit. Nothing needs this yet since no *ordinary* local is
+    address-taken in any test so far (see the previous bullet).
+
+  - Float *arithmetic*. Float64 now works end-to-end as a constant, a
+    function parameter/return type (ASIGNATURE's sigchar(), see "A
+    function's real ASIGNATURE..." above), and a call argument/result
+    (test.c's test_float()) -- but txt.c's gopcode() (the OADD/OSUB/
+    OMUL/OSTUFF -> A* opcode table every binary op and comparison goes
+    through) is still, in its own words, "only int is wired up for this
+    bootstrap": it picks AADDW/AADDQ purely from typev[] (int vs vlong),
+    with no typefd[] branch to pick AADDF/AADDD/etc for an actual float
+    operand. A real float expression (`2.2 + x`, not just `return
+    2.2;`) would currently silently emit the wrong (integer) opcode
+    rather than diag()ing -- nothing in the shared test sources performs
+    float arithmetic yet, only passes float64 values through unchanged,
+    which is why this went unnoticed until written down here.

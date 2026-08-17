@@ -1,7 +1,7 @@
 /* vl - mips linker */
 #define	EXTERN
 #include	"l.h"
-#include	<ar.h>
+#include	<obj/ar.h>
 
 char	*noname		= "<none>";
 char	symname[]	= SYMDEF;
@@ -46,12 +46,32 @@ main(int argc, char *argv[])
 	INITDAT = -1;
 	INITRND = -1;
 	INITENTRY = 0;
+	optlevel = 3;
 
 	ARGBEGIN {
 	default:
 		c = ARGC();
 		if(c >= 0 && c < sizeof(debug))
 			debug[c]++;
+		break;
+	case 'O':
+		/* claude: -O already meant a bare verbose-trace boolean
+		 * (span.c's oplook/regoff prints) before this -- keep that
+		 * for plain -O, and only treat it as the new gcc-style
+		 * numeric level when a digit is actually attached, e.g.
+		 * -O0/-O3, peeking _args (include/flag/cli.h's ARGBEGIN/
+		 * ARGF() internal state) rather than blindly calling ARGF(),
+		 * which would otherwise swallow the next filename argument
+		 * as if it were the level for plain -O. */
+		if(_args[0] >= '0' && _args[0] <= '9') {
+			a = ARGF();
+			optlevel = atoi(a);
+			if(optlevel < 0)
+				optlevel = 0;
+			if(optlevel > 3)
+				optlevel = 3;
+		} else
+			debug['O']++;
 		break;
 	case 'o':
 		outfile = ARGF();
@@ -314,13 +334,19 @@ objfile(char *file)
 	struct ar_hdr arhdr;
 	char *e, *start, *stop;
 
+	// claude: was resolving -lXXX straight to a hardcoded
+	// /usr/$Xlib/libXXX.a (or /$plan9/lib/libXXX.a under -9), ignoring
+	// -L entirely -- unlike linkers/7l/pobj.c's objfile(), which
+	// already searches libdir[] (the -L list) via findlib(). Same fix
+	// as 7l's, ported here; see docs/claude_notes/notes_shared_frontend_bugs.txt.
 	if(file[0] == '-' && file[1] == 'l') {
-		if(debug['9'])
-			sprint(name, "/%s/lib/lib", thestring);
-		else
-			sprint(name, "/usr/%clib/lib", thechar);
-		strcat(name, file+2);
-		strcat(name, ".a");
+		snprint(pname, sizeof(pname), "lib%s.a", file+2);
+		e = findlib(pname);
+		if(e == nil) {
+			diag("cannot find library: %s", file);
+			errorexit();
+		}
+		snprint(name, sizeof(name), "%s/%s", e, pname);
 		file = name;
 	}
 	if(debug['v'])
@@ -706,16 +732,10 @@ ldobj(int f, int32 c, char *pn)
 	uchar *bloc, *bsize, *stop;
 	Sym *h[NSYM], *s, *di;
 	int v, o, r, skip;
-    int hlen;
 
 	bsize = buf.xbuf;
 	bloc = buf.xbuf;
 	di = S;
-
-    //coupling: va/lex.c and and vc/swt.c
-    hlen = strlen("mips\n\n!\n");
-    seek(f, hlen, SEEK__CUR);
-    c-=hlen;
 
 newloop:
 	memset(h, 0, sizeof(h));

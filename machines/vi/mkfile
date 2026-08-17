@@ -1,9 +1,8 @@
 TOP=../../
-<$TOP/mkconfig
 <$TOP/mkfiles/$objtype/mkfile
 
 TARG=vi
-LDLIBS=-lmach_ -lbio -l9 -lm
+LDLIBS=-lmach -lbio $BOOTLIBS
 
 OFILES=vi.$O\
 	run.$O\

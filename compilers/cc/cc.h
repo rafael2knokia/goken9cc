@@ -1,21 +1,17 @@
+/*s: cc/cc.h */
 #include <u.h>
 #include <libc.h>
 #include <bio.h>
 #include <ctype.h>
 
-//TODO: to restore?
-//#pragma	lib	"../cc/cc.a$O"
-
-#ifndef	EXTERN
-#define EXTERN	extern
-#endif
+#pragma	lib	"../cc/cc.a$O" //$
 
 typedef	struct	Node	Node;
-typedef	struct	Sym	Sym;
 typedef	struct	Type	Type;
-typedef	struct	Funct	Funct;
+typedef	struct	Sym		Sym;
 typedef	struct	Decl	Decl;
-typedef	struct	Io	Io;
+typedef	struct	Funct	Funct;
+typedef	struct	Io		Io;
 typedef	struct	Hist	Hist;
 typedef	struct	Term	Term;
 typedef	struct	Init	Init;
@@ -23,480 +19,879 @@ typedef	struct	Bits	Bits;
 
 typedef	Rune	TRune;	/* target system type */
 
+/*s: constant [[NHUNK]] */
 #define	NHUNK		50000L
+/*e: constant [[NHUNK]] */
+/*s: constant [[BUFSIZ]] */
 #define	BUFSIZ		8192
+/*e: constant [[BUFSIZ]] */
+/*s: constant [[NSYMB]] */
 #define	NSYMB		1500
+/*e: constant [[NSYMB]] */
+/*s: constant [[NHASH]] */
 #define	NHASH		1024
+/*e: constant [[NHASH]] */
+/*s: constant [[STRINGSZ]] */
 #define	STRINGSZ	200
+/*e: constant [[STRINGSZ]] */
+/*s: constant [[HISTSZ]] */
 #define	HISTSZ		20
+/*e: constant [[HISTSZ]] */
+/*s: constant [[YYMAXDEPTH]] */
 #define YYMAXDEPTH	1500
+/*e: constant [[YYMAXDEPTH]] */
+/*s: constant [[NTERM]] */
 #define	NTERM		10
+/*e: constant [[NTERM]] */
+/*s: constant [[MAXALIGN]] */
 #define	MAXALIGN	7
+/*e: constant [[MAXALIGN]] */
 
-//#define	SIGN(n)		(1ULL<<(n-1)) // in plan9-github
-#define	SIGN(n)		((uvlong)1<<(n-1))
+/*s: function [[SIGN]] */
+#define	SIGN(n)		(1ULL<<(n-1))
+/*e: function [[SIGN]] */
+/*s: function [[MASK]] */
 #define	MASK(n)		(SIGN(n)|(SIGN(n)-1))
+/*e: function [[MASK]] */
 
+/*s: constant [[BITS]] */
 #define	BITS	5
+/*e: constant [[BITS]] */
+/*s: constant [[NVAR]] */
+// claude: uint32, not ulong: the bits code (blsh, /32, %32) assumes
+// 32-bit words; 64-bit ulongs make NVAR 320 and blsh(160+) writes past
+// b[BITS] (stack smash on functions with many variables, e.g.
+// libsec blake2sblock.c)
 #define	NVAR	(BITS*sizeof(uint32)*8)
+/*e: constant [[NVAR]] */
+/*s: struct [[Bits]] */
 struct	Bits
 {
-	uint32	b[BITS];
+    uint32	b[BITS];
 };
+/*e: struct [[Bits]] */
 
+/*s: struct [[Node]] */
 struct	Node
 {
-	Node*	left;
-	Node*	right;
-	void*	label;
-	long	pc;
-	int	reg;
-    //old: was 'long', but important to use int32
-    // see tests/c/misc/minus_one_index.c bug otherwise on 64 bits machine
-    // where long is using 8 bytes and overflow will require different numbers.
-	int32	xoffset;
-	double	fconst;		/* fp constant */
-	vlong	vconst;		/* non fp const */
-	char*	cstring;	/* character string */
-	TRune*	rstring;	/* rune string */
+    // enum<node_kind>
+    char	op;
 
-	Sym*	sym;
-	Type*	type;
-	long	lineno;
-	char	op;
-	char	oldop;
-	char xcast;
-	char	class;
-	char	etype;
-	char	complex;
-	char	addable;
-	char	scale;
-	char	garb;
+    // option<ref_own<Node>>
+    Node*	left;
+    // option<ref_own<Node>>
+    Node*	right;
+
+    // after preprocessing, global lineno
+    long	lineno; 
+
+    /*s: [[Node]] value fields */
+    Sym*	sym; // for ONAME, ODOT/OELEM, OXXX of OLABEL/OGOTO
+    /*x: [[Node]] value fields */
+    vlong	vconst; /* non fp const */ // for OCONST
+    /*x: [[Node]] value fields */
+    double	fconst;		/* fp constant */ // for OCONST
+    /*x: [[Node]] value fields */
+    char*	cstring;	/* character string */ // for OSTRING (and OCONST)
+    /*x: [[Node]] value fields */
+    TRune*	rstring;	/* rune string */ // for OLSTRING
+    /*x: [[Node]] value fields */
+    // option<enum<registr>>
+    int		reg; // for OREGISTER
+    /*e: [[Node]] value fields */
+
+    // ----------------------------------------------------------------------
+    // Post parsing annotations
+    // ----------------------------------------------------------------------
+    /*s: [[Node]] type and storage fields */
+    Type*	type;
+    /*x: [[Node]] type and storage fields */
+    // enum<type_kind>, inline of Node.type->etype?
+    char	etype;
+    /*x: [[Node]] type and storage fields */
+    // enum<storage_class>
+    char	class;
+    /*e: [[Node]] type and storage fields */
+    /*s: [[Node]] code generation fields */
+    // address-able, used as a bool to mark lvalues, if can assign you can take
+    // the address of. used by xcom() to assign ``addressibility''.
+    // (also (ab)used as a bool to mark label uses (true = used in a goto))
+    char	addable;
+    /*x: [[Node]] code generation fields */
+    // complexity in number of registers. for register allocation?
+    // (also (ab)used as FNX special value)
+    // (also (ab)used as a bool to mark label definitions (true = already defined))
+    char	complex; 
+    /*x: [[Node]] code generation fields */
+    // claude: must be int32, not long: offset arithmetic relies on 32-bit
+    // overflow; see tests/c/misc/minus_one_index.c on 64-bit hosts
+    int32	xoffset;
+    /*x: [[Node]] code generation fields */
+    long	pc;
+    /*x: [[Node]] code generation fields */
+    // ref<Prog>, but use 'void*' to be archi independent
+    void*	label;
+    /*x: [[Node]] code generation fields */
+    char	scale; // x86 only
+    /*e: [[Node]] code generation fields */
+    /*s: [[Node]] origin tracking fields */
+    bool 	xcast;
+    /*x: [[Node]] origin tracking fields */
+    // enum<node_kind>
+    char	oldop;
+    /*e: [[Node]] origin tracking fields */
+
+    // ----------------------------------------------------------------------
+    // Misc
+    // ----------------------------------------------------------------------
+    /*s: [[Node]] parsing helper fields */
+    // enum<qualifier>
+    char	nodegarb;
+    /*e: [[Node]] parsing helper fields */
 };
-#define	Z	((Node*)0)
+/*e: struct [[Node]] */
+/*s: constant [[Z]] */
+#define	Z	((Node*)nil)
+/*e: constant [[Z]] */
 
+/*s: struct [[Sym]] */
 struct	Sym
 {
-	Sym*	link;
-	Type*	type;
-	Type*	suetag;
-	Type*	tenum;
-	char*	macro;
-	long	varlineno;
-	long	offset;
-	vlong	vconst;
-	double	fconst;
-	Node*	label;
-	ushort	lexical;
-	char	*name;
-	ushort	block;
-	ushort	sueblock;
-	char	class;
-	char	sym;
-	char	aused;
-	char	sig;
+    // Symbolic names are used for: 
+    //  - identifiers (locals/params/globals, functions, typedefs
+    //    and also enum constants)
+    //  - tags (struct/union/enum) 
+    //  - labels (for the goto)
+    // and also during parsing for:
+    //  - macros (the #define)
+    //  - keywords lexeme (abuse)
+
+    // ----------------------------------------------------------------------
+    // The "key"
+    // ----------------------------------------------------------------------
+    char	*name;
+
+    // ----------------------------------------------------------------------
+    // The "value" for the different "namespaces"
+    // ----------------------------------------------------------------------
+    /*s: [[Sym]] identifier value fields */
+    /*s: [[Sym]] identifier value, type and storage fields */
+    // ref<Type>
+    Type*	type;
+    // enum<Storage_class>
+    char	class;
+    /*e: [[Sym]] identifier value, type and storage fields */
+    /*s: [[Sym]] identifier value, scope fields */
+    ushort	block;
+    /*e: [[Sym]] identifier value, scope fields */
+    /*s: [[Sym]] identifier value, checking fields */
+    bool	aused;
+    /*e: [[Sym]] identifier value, checking fields */
+    /*s: [[Sym]] identifier value, code generation fields */
+    long	offset;
+    /*x: [[Sym]] identifier value, code generation fields */
+    // index in h when the Sym is really a symbol, 0 when not a symbol
+    char	symidx;
+    /*x: [[Sym]] identifier value, code generation fields */
+    // enum<signature>
+    char	sig;
+    /*e: [[Sym]] identifier value, code generation fields */
+    /*x: [[Sym]] identifier value fields */
+    long	varlineno;
+    /*e: [[Sym]] identifier value fields */
+    /*s: [[Sym]] enum value fields */
+    // ref<Type>
+    Type*	tenum;
+    /*x: [[Sym]] enum value fields */
+    vlong	vconst;
+    double	fconst;
+    /*e: [[Sym]] enum value fields */
+    /*s: [[Sym]] tag value fields */
+    Type*	suetag;
+    /*x: [[Sym]] tag value fields */
+    ushort	sueblock;
+    /*e: [[Sym]] tag value fields */
+    /*s: [[Sym]] label value fields */
+    Node*	label;
+    /*e: [[Sym]] label value fields */
+
+    /*s: [[Sym]] macro value fields */
+    char*	macro;
+    /*e: [[Sym]] macro value fields */
+    /*s: [[Sym]] lexeme value fields */
+    // enum<lexeme>
+    ushort	lexical;
+    /*e: [[Sym]] lexeme value fields */
+
+    // ----------------------------------------------------------------------
+    // Extra
+    // ----------------------------------------------------------------------
+    /*s: [[Sym]] extra fields */
+    // list<ref<Sym>> (next = Sym.link) bucket of hashtbl 'hash'
+    Sym*	link;
+    /*e: [[Sym]] extra fields */
 };
-#define	S	((Sym*)0)
+/*e: struct [[Sym]] */
+/*s: constant [[S]] */
+#define	S	((Sym*)nil)
+/*e: constant [[S]] */
 
-enum{
-	SIGNONE = 0,
-	SIGDONE = 1,
-	SIGINTERN = 2,
+/*s: enum [[signature]] */
+enum signature {
+    SIGNONE = 0,
+    SIGDONE = 1,
+    SIGINTERN = 2,
 
-	SIGNINTERN = 1729*325*1729,
+    // ???
+    SIGNINTERN = 1729*325*1729,
 };
+/*e: enum [[signature]] */
 
+/*s: struct [[Decl]] */
 struct	Decl
 {
-	Decl*	link;
-	Sym*	sym;
-	Type*	type;
-	long	varlineno;
-	long	offset;
-	short	val;
-	ushort	block;
-	char	class;
-	char	aused;
-};
-#define	D	((Decl*)0)
+    Sym*	sym;
+    // enum<Namespace>
+    short	val;
 
+    /*s: [[Decl]] sym copy fields */
+    Type*	type;  // for Sym.type and Sym.suetag
+    ushort	block; // for Sym.block and Sym.sueblock and autobn
+    /*x: [[Decl]] sym copy fields */
+    long	offset; // for Sym.offset and autoffset
+    /*x: [[Decl]] sym copy fields */
+    char	class;
+    long	varlineno;
+    /*x: [[Decl]] sym copy fields */
+    bool	aused;
+    /*e: [[Decl]] sym copy fields */
+
+    // Extra fields
+    /*s: [[Decl]] extra fields */
+    // list<ref_own<Decl> of dclstack
+    Decl*	link;
+    /*e: [[Decl]] extra fields */
+};
+/*e: struct [[Decl]] */
+/*s: constant [[D]] */
+#define	D	((Decl*)nil)
+/*e: constant [[D]] */
+
+/*s: struct [[Type]] */
 struct	Type
 {
-	Sym*	sym;
-	Sym*	tag;
-	Funct*	funct;
-	Type*	link;
-	Type*	down;
-	long	width;
-	long	offset;
-	long	lineno;
-	schar	shift;
-	char	nbits;
-	char	etype;
-	char	garb;
+    // enum<type_kind>
+    char	etype;
+
+    // option<ref_own<Type>, e.g. for '*int' have TIND -link-> TINT
+    Type*	link;
+    // option<list<ref_own<Type>>, next = Type.down, for TFUNC and TSTRUCT
+    Type*	down;
+
+    /*s: [[Type]] qualifier fields */
+    // enum<qualifier>
+    char	garb;
+    /*e: [[Type]] qualifier fields */
+
+    // ----------------------------------------------------------------------
+    // Post parsing annotations
+    // ----------------------------------------------------------------------
+    /*s: [[Type]] code generation fields */
+    long	width; // ewidth[Type.etype]
+    /*x: [[Type]] code generation fields */
+    long	offset;
+    /*x: [[Type]] code generation fields */
+    schar	shift;
+    char	nbits;
+    /*e: [[Type]] code generation fields */
+
+    /*s: [[Type]] other fields */
+    Sym*	tag;
+    /*x: [[Type]] other fields */
+    Sym*	sym; // for fields in structures
+    /*x: [[Type]] other fields */
+    Funct*	funct;
+    /*e: [[Type]] other fields */
 };
+/*e: struct [[Type]] */
+/*s: constant [[T]] */
+#define	T	((Type*)nil)
+/*e: constant [[T]] */
+/*s: constant [[NODECL]] */
+#define	NODECL	((void(*)(int, Type*, Sym*)) nil)
+/*e: constant [[NODECL]] */
 
-#define	T	((Type*)0)
-#define	NODECL	((void(*)(int, Type*, Sym*))0)
-
+/*s: struct [[Init]] */
 struct	Init			/* general purpose initialization */
 {
-	int	code;
-	ulong	value;
-	char*	s;
+    int		code;
+    ulong	value;
+    char*	s;
 };
+/*e: struct [[Init]] */
 
-EXTERN struct
+
+/*s: struct [[Fi]] */
+struct Fi
 {
-	char*	p;
-	int	c;
-} fi;
+    // ref<char> (target = Io.b)
+    char*	p;
+    // remaining characters in Io.b to read
+    int	c;
+};
+/*e: struct [[Fi]] */
+extern struct Fi fi;
 
+/*s: struct [[Io]] */
 struct	Io
 {
-	Io*	link;
-	char*	p;
-	char	b[BUFSIZ];
-	short	c;
-	short	f;
+    // option<fdt> (None = -1)
+    short	f;
+    /*s: [[Io]] buffer fields */
+    char	b[BUFSIZ];
+    /*x: [[Io]] buffer fields */
+    // like Fi, saved pointers in Io.b
+    char*	p;
+    short	c;
+    /*e: [[Io]] buffer fields */
+    // Extra
+    /*s: [[Io]] extra fields */
+    // list<ref_own<Io>> (from = iostack or iofree)
+    Io*	link;
+    /*e: [[Io]] extra fields */
 };
-#define	I	((Io*)0)
+/*e: struct [[Io]] */
+/*s: constant [[I]] */
+#define	I	((Io*)nil)
+/*e: constant [[I]] */
 
+/*s: struct [[Hist]] */
 struct	Hist
 {
-	Hist*	link;
-	char*	name;
-	long	line;
-	long	offset;
-};
-#define	H	((Hist*)0)
-EXTERN Hist*	hist;
+    // option<ref_own<string> (None = nil = a ``pop'')
+    char*	name;
 
+    // global line of this Hist
+    long	line;
+    // 0 for #include, +n for #line, -1 for #pragma lib (ugly)
+    long	offset;
+
+    // Extra
+    /*s: [[Hist]] extra fields */
+    Hist*	link;
+    /*e: [[Hist]] extra fields */
+};
+/*e: struct [[Hist]] */
+/*s: constant [[H]] */
+#define	H	((Hist*)nil)
+/*e: constant [[H]] */
+extern Hist*	hist;
+
+/*s: struct [[Term]] */
 struct	Term
 {
-	vlong	mult;
-	Node	*node;
+    vlong	mult;
+    Node	*node;
 };
+/*e: struct [[Term]] */
 
-enum
+/*s: enum [[os]] */
+enum os				/* also in ../{8a,5a,0a}.h */
 {
-	Axxx,
-	Ael1,
-	Ael2,
-	Asu2,
-	Aarg0,
-	Aarg1,
-	Aarg2,
-	Aaut3,
-	NALIGN,
+    Plan9	= 1<<0,
+    Unix	= 1<<1,
+    //Windows	= 1<<2,
 };
-
-enum				/* also in ../{8a,0a}.h */
+/*e: enum [[os]] */
+/*s: enum [[node_kind]] */
+enum Node_kind
 {
-	Plan9	= 1<<0,
-	Unix	= 1<<1,
-	Windows	= 1<<2,
-};
+    OXXX,
 
-enum
+    // ----------------------------------------------------------------------
+    // Names
+    // ----------------------------------------------------------------------
+    ONAME, // for uses and declarations
+
+    // ----------------------------------------------------------------------
+    // Expressions
+    // ----------------------------------------------------------------------
+    /*s: expression nodes */
+    OCOMMA,
+    /*x: expression nodes */
+    OCONST,
+    /*x: expression nodes */
+    OSTRING,
+    /*x: expression nodes */
+    OLSTRING,
+    /*x: expression nodes */
+    OADD,
+    OSUB,
+
+    OMUL,
+    ODIV,
+    OMOD,
+    /*x: expression nodes */
+    OPOS,
+    ONEG,
+    /*x: expression nodes */
+    OAND,
+    OOR,
+    OXOR,
+
+    OASHL,
+    OASHR,
+    /*x: expression nodes */
+    OANDAND,
+    OOROR,
+    /*x: expression nodes */
+    ONOT,
+    OCOM,
+    /*x: expression nodes */
+    OEQ,
+    ONE,
+
+    OLT,
+    OGT,
+    OLE,
+    OGE,
+    /*x: expression nodes */
+    OAS,
+    /*x: expression nodes */
+    OASADD,
+    OASSUB,
+
+    OASMUL,
+    OASMOD,
+    OASDIV,
+
+    OASAND,
+    OASOR,
+    OASXOR,
+
+    OASASHL,
+    OASASHR,
+    /*x: expression nodes */
+    OIND, // for uses (dereference) and also declarations
+    OADDR,
+    /*x: expression nodes */
+    ODOT,
+    /*x: expression nodes */
+    OFUNC, // used for uses (calls) but also defs (and decls)
+    /*x: expression nodes */
+    OCAST,
+    /*x: expression nodes */
+    OCOND,
+    /*x: expression nodes */
+    OPREDEC,
+    OPREINC,
+    /*x: expression nodes */
+    OPOSTINC,
+    OPOSTDEC,
+    /*x: expression nodes */
+    OSIZE,
+    /*x: expression nodes */
+    OARRAY, // used for uses (designator) and declarations
+    /*x: expression nodes */
+    OASI, // appears during parsing
+    /*x: expression nodes */
+    OSTRUCT,
+    OUNION,
+    /*x: expression nodes */
+    OSIGN,
+    /*e: expression nodes */
+
+    // ----------------------------------------------------------------------
+    // Statements
+    // ----------------------------------------------------------------------
+    /*s: statement nodes */
+    OIF,
+    /*x: statement nodes */
+    OWHILE,
+    ODWHILE,
+    OFOR,
+    /*x: statement nodes */
+    ORETURN,
+
+    OBREAK,
+    OCONTINUE,
+    /*x: statement nodes */
+    OLABEL,
+    OGOTO,
+    /*x: statement nodes */
+    OSWITCH,
+    OCASE, // for default too, in which case Node.left is null
+    /*x: statement nodes */
+    OUSED,
+    OSET,
+    /*e: statement nodes */
+
+    // ----------------------------------------------------------------------
+    // Declarations (parameters, initializers, bit fields)
+    // ----------------------------------------------------------------------
+    /*s: declaration nodes */
+    OINIT,
+    /*x: declaration nodes */
+    OELEM,  // field designator
+    /*x: declaration nodes */
+    OPROTO,
+    /*x: declaration nodes */
+    ODOTDOT,
+    /*x: declaration nodes */
+    OBIT,
+    /*e: declaration nodes */
+
+    // ----------------------------------------------------------------------
+    // Misc
+    // ----------------------------------------------------------------------
+    /*s: misc nodes */
+    OLIST, // of stmts/labels/parameters/...  and also for pairs/triples/...
+    /*x: misc nodes */
+    OINDEX, // x86 only
+    OREGPAIR, // x86 only, for 64 bits stuff
+    /*e: misc nodes */
+
+    // ----------------------------------------------------------------------
+    // Post parsing nodes
+    // ----------------------------------------------------------------------
+    /*s: after parsing nodes */
+    OREGISTER,
+    /*x: after parsing nodes */
+    OLSHR,
+    /*x: after parsing nodes */
+    OLMUL,
+    OLDIV,
+    /*x: after parsing nodes */
+    OLMOD,
+    /*x: after parsing nodes */
+    OASLSHR,
+    OASLMUL,
+    OASLDIV,
+    OASLMOD,
+    /*x: after parsing nodes */
+    OINDREG,
+    /*x: after parsing nodes */
+    OHI,
+    OHS,
+    OLO,
+    OLS,
+    /*x: after parsing nodes */
+    OEXREG,
+    /*e: after parsing nodes */
+
+    OEND
+};
+/*e: enum [[node_kind]] */
+/*s: enum [[type_kind]] */
+enum Type_kind
 {
-	DMARK,
-	DAUTO,
-	DSUE,
-	DLABEL,
+    TXXX,
+
+    /*s: [[Type_kind]] integer cases */
+    TCHAR,
+    TUCHAR,
+
+    TSHORT,
+    TUSHORT,
+
+    TINT,
+    TUINT,
+
+    TLONG,
+    TULONG,
+
+    TVLONG,
+    TUVLONG,
+    /*e: [[Type_kind]] integer cases */
+    /*s: [[Type_kind]] float cases */
+    TFLOAT,
+    TDOUBLE,
+    /*e: [[Type_kind]] float cases */
+    /*s: [[Type_kind]] void case */
+    TVOID,
+    /*e: [[Type_kind]] void case */
+    /*s: [[Type_kind]] composite cases */
+    TIND,
+    TARRAY,
+
+    TFUNC,
+
+    TSTRUCT,
+    TUNION,
+
+    TENUM,
+    /*e: [[Type_kind]] composite cases */
+    /*s: [[Type_kind]] other cases */
+    TDOT, // ... in function types
+    /*e: [[Type_kind]] other cases */
+
+    NTYPE,
 };
-enum
+/*e: enum [[type_kind]] */
+/*s: enum [[type_kind_bis]] */
+enum type_kind_bis {
+    // ----------------------------------------------------------------------
+    // Type (see separate Type_kind)
+    // ----------------------------------------------------------------------
+
+    // ----------------------------------------------------------------------
+    // Class storage (temporary, see CAUTO/CEXTERN/... for final storage)
+    // ----------------------------------------------------------------------
+    /*s: [[Type_kind_bis]] storage cases */
+    TAUTO	= NTYPE,
+    TEXTERN,
+    TSTATIC,
+
+    TTYPEDEF, // ugly, not really a storage class
+    TREGISTER,
+    /*x: [[Type_kind_bis]] storage cases */
+    TTYPESTR,
+    /*e: [[Type_kind_bis]] storage cases */
+
+    // ----------------------------------------------------------------------
+    // Qualifiers (aka garbage) (temporary, see GCONSTNT/GVOLATILE)
+    // ----------------------------------------------------------------------
+    /*s: [[Type_kind_bis]] qualifier cases */
+    TCONSTNT,
+    TVOLATILE,
+    /*e: [[Type_kind_bis]] qualifier cases */
+
+    // ----------------------------------------------------------------------
+    // Signs (temporary, see TUINT/TULONG/... for final types)
+    // ----------------------------------------------------------------------
+    /*s: [[Type_kind_bis]] sign cases */
+    TUNSIGNED,
+    TSIGNED,
+    /*e: [[Type_kind_bis]] sign cases */
+
+    // ----------------------------------------------------------------------
+    // Misc
+    // ----------------------------------------------------------------------
+    /*s: [[Type_kind_bis]] misc cases */
+    TOLD,
+    /*e: [[Type_kind_bis]] misc cases */
+
+    NALLTYPES,
+
+    /*s: constant [[TRUNE]] */
+    /* adapt size of Rune to target system's size */
+    TRUNE = sizeof(TRune)==4? TUINT: TUSHORT,
+    /*e: constant [[TRUNE]] */
+};
+/*e: enum [[type_kind_bis]] */
+/*s: enum [[align]] */
+enum align
 {
-	OXXX,
-	OADD,
-	OADDR,
-	OAND,
-	OANDAND,
-	OARRAY,
-	OAS,
-	OASI,
-	OASADD,
-	OASAND,
-	OASASHL,
-	OASASHR,
-	OASDIV,
-	OASHL,
-	OASHR,
-	OASLDIV,
-	OASLMOD,
-	OASLMUL,
-	OASLSHR,
-	OASMOD,
-	OASMUL,
-	OASOR,
-	OASSUB,
-	OASXOR,
-	OBIT,
-	OBREAK,
-	OCASE,
-	OCAST,
-	OCOMMA,
-	OCOND,
-	OCONST,
-	OCONTINUE,
-	ODIV,
-	ODOT,
-	ODOTDOT,
-	ODWHILE,
-	OENUM,
-	OEQ,
-	OFOR,
-	OFUNC,
-	OGE,
-	OGOTO,
-	OGT,
-	OHI,
-	OHS,
-	OIF,
-	OIND,
-	OINDREG,
-	OINIT,
-	OLABEL,
-	OLDIV,
-	OLE,
-	OLIST,
-	OLMOD,
-	OLMUL,
-	OLO,
-	OLS,
-	OLSHR,
-	OLT,
-	OMOD,
-	OMUL,
-	ONAME,
-	ONE,
-	ONOT,
-	OOR,
-	OOROR,
-	OPOSTDEC,
-	OPOSTINC,
-	OPREDEC,
-	OPREINC,
-	OPROTO,
-	OREGISTER,
-	ORETURN,
-	OSET,
-	OSIGN,
-	OSIZE,
-	OSTRING,
-	OLSTRING,
-	OSTRUCT,
-	OSUB,
-	OSWITCH,
-	OUNION,
-	OUSED,
-	OWHILE,
-	OXOR,
-	ONEG,
-	OCOM,
-	OPOS,
-	OELEM,
+    Axxx,
 
-	OTST,		/* used in some compilers */
-	OINDEX,
-	OFAS,
-	OREGPAIR,
-	OEXREG,
+    Ael1,
+    Ael2,
+    Asu2,
+    Aarg0,
+    Aarg1,
+    Aarg2,
+    Aaut3,
 
-	OEND
+    NALIGN,
 };
-enum
+/*e: enum [[align]] */
+/*s: enum [[dxxx]] */
+enum Namespace
 {
-	TXXX,
-	TCHAR,
-	TUCHAR,
-	TSHORT,
-	TUSHORT,
-	TINT,
-	TUINT,
-	TLONG,
-	TULONG,
-	TVLONG,
-	TUVLONG,
-	TFLOAT,
-	TDOUBLE,
-	TIND,
-	TFUNC,
-	TARRAY,
-	TVOID,
-	TSTRUCT,
-	TUNION,
-	TENUM,
-	TDOT,
-	NTYPE,
+    DMARK, // special mark to help separate the different scopes
 
-	TAUTO	= NTYPE,
-	TEXTERN,
-	TSTATIC,
-	TTYPEDEF,
-	TTYPESTR,
-	TREGISTER,
-	TCONSTNT,
-	TVOLATILE,
-	TUNSIGNED,
-	TSIGNED,
-	TFILE,
-	TOLD,
-	NALLTYPES,
-
-	/* adapt size of Rune to target system's size */
-	TRUNE = sizeof(TRune)==4? TUINT: TUSHORT,
+    DAUTO, // locals/parameters/globals/typedefs/functions identifiers
+    DSUE,  // struct/union/enum tags
+    DLABEL,// labels, goto
 };
-enum
+/*e: enum [[dxxx]] */
+/*s: enum [[storage_class]] */
+enum Storage_class
 {
-	CXXX,
-	CAUTO,
-	CEXTERN,
-	CGLOBL,
-	CSTATIC,
-	CLOCAL,
-	CTYPEDEF,
-	CTYPESTR,
-	CPARAM,
-	CSELEM,
-	CLABEL,
-	CEXREG,
-	NCTYPES,
+    CXXX,
+
+    CAUTO,
+    CPARAM,
+
+    CEXTERN,
+    CGLOBL,
+    CSTATIC,
+
+    /*s: [[Storage_class]] cases */
+    CTYPEDEF,
+    /*x: [[Storage_class]] cases */
+    CLOCAL, // local static
+    /*x: [[Storage_class]] cases */
+    CEXREG, // extern register, kenccext (used in kernel for mips)
+    /*x: [[Storage_class]] cases */
+    CTYPESTR,
+    /*e: [[Storage_class]] cases */
+
+    NCTYPES,
 };
-enum
+/*e: enum [[storage_class]] */
+/*s: enum [[qualifier]] */
+enum Qualifier
 {
-	GXXX		= 0,
-	GCONSTNT	= 1<<0,
-	GVOLATILE	= 1<<1,
-	NGTYPES		= 1<<2,
+    GXXX		= 0, // None
 
-	GINCOMPLETE	= 1<<2,
+    GCONSTNT	= 1<<0,
+    GVOLATILE	= 1<<1,
+
+    NGTYPES		= 1<<2,
+    /*s: [[Qualifier]] other cases */
+    GINCOMPLETE	= 1<<2,
+    /*e: [[Qualifier]] other cases */
+
 };
-enum
+/*e: enum [[qualifier]] */
+/*s: enum [[bxxx]] */
+enum Bxxx
 {
-	BCHAR		= 1L<<TCHAR,
-	BUCHAR		= 1L<<TUCHAR,
-	BSHORT		= 1L<<TSHORT,
-	BUSHORT		= 1L<<TUSHORT,
-	BINT		= 1L<<TINT,
-	BUINT		= 1L<<TUINT,
-	BLONG		= 1L<<TLONG,
-	BULONG		= 1L<<TULONG,
-	BVLONG		= 1L<<TVLONG,
-	BUVLONG		= 1L<<TUVLONG,
-	BFLOAT		= 1L<<TFLOAT,
-	BDOUBLE		= 1L<<TDOUBLE,
-	BIND		= 1L<<TIND,
-	BFUNC		= 1L<<TFUNC,
-	BARRAY		= 1L<<TARRAY,
-	BVOID		= 1L<<TVOID,
-	BSTRUCT		= 1L<<TSTRUCT,
-	BUNION		= 1L<<TUNION,
-	BENUM		= 1L<<TENUM,
-	BFILE		= 1L<<TFILE,
-	BDOT		= 1L<<TDOT,
-	BCONSTNT	= 1L<<TCONSTNT,
-	BVOLATILE	= 1L<<TVOLATILE,
-	BUNSIGNED	= 1L<<TUNSIGNED,
-	BSIGNED		= 1L<<TSIGNED,
-	BAUTO		= 1L<<TAUTO,
-	BEXTERN		= 1L<<TEXTERN,
-	BSTATIC		= 1L<<TSTATIC,
-	BTYPEDEF	= 1L<<TTYPEDEF,
-	BTYPESTR	= 1L<<TTYPESTR,
-	BREGISTER	= 1L<<TREGISTER,
+    BCHAR		= 1L<<TCHAR,
+    BUCHAR		= 1L<<TUCHAR,
+    BSHORT		= 1L<<TSHORT,
+    BUSHORT		= 1L<<TUSHORT,
+    BINT		= 1L<<TINT,
+    BUINT		= 1L<<TUINT,
+    BLONG		= 1L<<TLONG,
+    BULONG		= 1L<<TULONG,
+    BVLONG		= 1L<<TVLONG,
+    BUVLONG		= 1L<<TUVLONG,
+    BFLOAT		= 1L<<TFLOAT,
+    BDOUBLE		= 1L<<TDOUBLE,
 
-	BINTEGER	= BCHAR|BUCHAR|BSHORT|BUSHORT|BINT|BUINT|
-				BLONG|BULONG|BVLONG|BUVLONG,
-	BNUMBER		= BINTEGER|BFLOAT|BDOUBLE,
+    BIND		= 1L<<TIND,
+    BFUNC		= 1L<<TFUNC,
+    BARRAY		= 1L<<TARRAY,
+    BVOID		= 1L<<TVOID,
+    BSTRUCT		= 1L<<TSTRUCT,
+    BUNION		= 1L<<TUNION,
+    BENUM		= 1L<<TENUM,
 
-/* these can be overloaded with complex types */
+    BDOT		= 1L<<TDOT,
 
-	BCLASS		= BAUTO|BEXTERN|BSTATIC|BTYPEDEF|BTYPESTR|BREGISTER,
-	BGARB		= BCONSTNT|BVOLATILE,
+    BCONSTNT	= 1L<<TCONSTNT,
+    BVOLATILE	= 1L<<TVOLATILE,
+
+    BUNSIGNED	= 1L<<TUNSIGNED,
+    BSIGNED		= 1L<<TSIGNED,
+
+    BAUTO		= 1L<<TAUTO,
+    BEXTERN		= 1L<<TEXTERN,
+    BSTATIC		= 1L<<TSTATIC,
+    BTYPEDEF	= 1L<<TTYPEDEF,
+    BREGISTER	= 1L<<TREGISTER,
+    /*s: [[Bxxx]] cases */
+    BTYPESTR	= 1L<<TTYPESTR,
+    /*e: [[Bxxx]] cases */
+
+    /*s: [[Bxxx]] constants */
+    /* these can be overloaded with complex types */
+    BCLASS		= BAUTO|BEXTERN|BSTATIC|BTYPEDEF|BTYPESTR|BREGISTER,
+    /*x: [[Bxxx]] constants */
+    BGARB		= BCONSTNT|BVOLATILE,
+    /*x: [[Bxxx]] constants */
+    BINTEGER	= BCHAR|BUCHAR|BSHORT|BUSHORT|BINT|BUINT|BLONG|BULONG|BVLONG|BUVLONG,
+    BNUMBER		= BINTEGER | BFLOAT|BDOUBLE,
+    /*e: [[Bxxx]] constants */
 };
+/*e: enum [[bxxx]] */
 
+/*s: struct [[Funct]] */
 struct	Funct
 {
-	Sym*	sym[OEND];
-	Sym*	castto[NTYPE];
-	Sym*	castfr[NTYPE];
+    Sym*	sym[OEND];
+    Sym*	castto[NTYPE];
+    Sym*	castfr[NTYPE];
 };
+/*e: struct [[Funct]] */
 
-EXTERN struct
+/*s: struct [[En]] */
+struct En
 {
-	Type*	tenum;		/* type of entire enum */
-	Type*	cenum;		/* type of current enum run */
-	vlong	lastenum;	/* value of current enum */
-	double	floatenum;	/* value of current enum */
-} en;
+    Type*	tenum;		/* type of entire enum */
+    Type*	cenum;		/* type of current enum run */
+    /*s: [[En]] value fields */
+    vlong	lastenum;	/* value of current enum */
+    double	floatenum;	/* value of current enum */ // for floats enums
+    /*e: [[En]] value fields */
+};
+/*e: struct [[En]] */
+extern struct En en;
 
-EXTERN	int	autobn;
-EXTERN	long	autoffset;
-EXTERN	int	blockno;
-EXTERN	Decl*	dclstack;
-EXTERN	char	debug[256];
-EXTERN	Hist*	ehist;
-EXTERN	long	firstbit;
-EXTERN	Sym*	firstarg;
-EXTERN	Type*	firstargtype;
-EXTERN	Decl*	firstdcl;
-EXTERN	int	fperror;
-EXTERN	Sym*	hash[NHASH];
-EXTERN	int	hasdoubled;
-EXTERN	char*	hunk;
-EXTERN	char**	include;
-EXTERN	Io*	iofree;
-EXTERN	Io*	ionext;
-EXTERN	Io*	iostack;
-EXTERN	long	lastbit;
-EXTERN	char	lastclass;
-EXTERN	Type*	lastdcl;
-EXTERN	long	lastfield;
-EXTERN	Type*	lasttype;
-EXTERN	long	lineno;
-EXTERN	long	nearln;
-EXTERN	int	maxinclude;
-EXTERN	int	nerrors;
-EXTERN	int	newflag;
-EXTERN	long	nhunk;
-EXTERN	int	ninclude;
-EXTERN	Node*	nodproto;
-EXTERN	Node*	nodcast;
-EXTERN	Biobuf	outbuf;
-EXTERN	Biobuf	diagbuf;
-EXTERN	char*	outfile;
-EXTERN	char*	pathname;
-EXTERN	int	peekc;
-EXTERN	long	stkoff;
-EXTERN	Type*	strf;
-EXTERN	Type*	strl;
-EXTERN	char	symb[NSYMB];
-EXTERN	Sym*	symstring;
-EXTERN	int	taggen;
-EXTERN	Type*	tfield;
-EXTERN	Type*	tufield;
-EXTERN	int	thechar;
-EXTERN	char*	thestring;
-EXTERN	Type*	thisfn;
-EXTERN	long	thunk;
-EXTERN	Type*	types[NTYPE];
-EXTERN	Type*	fntypes[NTYPE];
-EXTERN	Node*	initlist;
-EXTERN	Term	term[NTERM];
-EXTERN	int	nterm;
-EXTERN	int	packflg;
-EXTERN	int	fproundflg;
-EXTERN	int	profileflg;
-EXTERN	int	ncontin;
-EXTERN	int	newvlongcode;
-EXTERN	int	canreach;
-EXTERN	int	warnreach;
-EXTERN	Bits	zbits;
+extern	int	autobn;
+extern	long	autoffset;
+extern	int	blockno;
+extern	Decl*	dclstack;
+extern	char	debug[256];
+/* claude: gcc/clang-style optimization level, set by -O (see lex.c);
+ * 0 disables regopt() entirely (cc2/pgen.c), >=2 also enables the
+ * peephole pass inside it (5c/8c's own reg.c). Defaults to 3 (full
+ * optimization, i.e. today's pre-existing no-flags-given behavior).
+ * -N is a legacy alias for -O0, folded into this after arg parsing
+ * (see lex.c). Mirrors compilers/cck/cc.h's optlevel -- see
+ * docs/claude_notes/notes_frontend_optlevels.txt. */
+extern	int	optlevel;
+extern	Hist*	ehist;
+extern	bool	firstbit;
+extern	Sym*	firstarg;
+extern	Type*	firstargtype;
+extern	Decl*	firstdcl;
+extern	Sym*	hash[NHASH];
+extern	char*	hunk;
+extern	char**	include;
+extern	Io*	iofree;
+extern	Io*	ionext;
+extern	Io*	iostack;
+extern	long	lastbit;
+extern	char	lastclass;
+extern	Type*	lastdcltype;
+extern	long	lastfield;
+extern	Type*	lasttype;
+extern	long	lineno;
+extern	long	nearln;
+extern	int	maxinclude;
+extern	int	nerrors;
+extern	bool	newflag;
+extern	long	nhunk;
+extern	int	ninclude;
+extern	Node*	nodproto;
+extern	Node*	nodcast;
+extern	Biobuf	outbuf;
+extern	Biobuf	diagbuf;
+extern	char*	outfile;
+extern	char*	pathname;
+extern	int	peekc;
+extern	long	stkoff;
+extern	Type*	strf;
+extern	Type*	strl;
+extern	char	symb[NSYMB];
+extern	Sym*	symstring;
+extern	int	taggen;
+extern	Type*	tfield;
+extern	Type*	tufield;
+extern	int	thechar;
+extern	char*	thestring;
+extern	Type*	thisfntype;
+extern	long	thunk;
+extern	Type*	types[NTYPE];
+
+extern	Type*	fntypes[NTYPE];
+extern	Node*	initlist;
+extern	Term	term[NTERM];
+extern	int	nterm;
+extern	int	packflg;
+extern	int	fproundflg;
+extern	bool	profileflg;
+extern	int	ncontin;
+extern	bool	canreach;
+extern	bool	warnreach;
+extern	Bits	zbits;
 
 extern	char	*onames[], *tnames[], *gnames[];
 extern	char	*cnames[], *qnames[], *bnames[];
-extern	char	tab[NTYPE][NTYPE];
+
 extern	char	comrel[], invrel[], logrel[];
 extern	long	ncast[], tadd[], tand[];
 extern	long	targ[], tasadd[], tasign[], tcast[];
@@ -510,19 +905,19 @@ extern	char	typesu[];
 extern	char	typesuv[];
 extern	char	typeu[];
 extern	char	typev[];
-extern	char	typec[];
-extern	char	typeh[];
-extern	char	typeil[];
 extern	char	typeilp[];
 extern	char	typechl[];
+
+// not used on ARM
 extern	char	typechlv[];
-extern	char	typechlvp[];
+extern	char	typeil[];
+
 extern	char	typechlp[];
 extern	char	typechlpfd[];
 
-EXTERN	char*	typeswitch;
-EXTERN	char*	typeword;
-EXTERN	char*	typecmplx;
+extern	char*	typeswitch;
+extern	char*	typeword;
+extern	char*	typecmplx;
 
 extern	ulong	thash1;
 extern	ulong	thash2;
@@ -530,103 +925,97 @@ extern	ulong	thash3;
 extern	ulong	thash[];
 
 /*
- *	Inferno.c/Posix.c/Nt.c
+ *	compat.c/unix.c/windows.c
  */
-int	systemtype(int);
+int	mywait(int*);
+int	mycreat(char*, int);
+int	myaccess(char*);
 int	pathchar(void);
+bool	systemtype(int);
+
+// utils.c
+void	gethunk(void);
+void*	allocn(void*, long, long);
+void*	alloc(long);
+void	errorexit(void);
+void	yyerror(char*, ...);
 
 /*
  *	parser
  */
+//@Scheck: def in y.tab.c from cc.y
 int	yyparse(void);
-int	mpatof(char*, double*);
-int	mpatov(char*, vlong*);
 
 /*
  *	lex.c
  */
-void*	allocn(void*, long, long);
-void*	alloc(long);
-void	cinit(void);
-int	compile(char*, char**, int);
-void	errorexit(void);
+long	yylex(void);
+
+Sym*	lookup(void);
+Sym*	slookup(char*);
+
 int	filbuf(void);
 int	getc(void);
-long	getr(void);
 int	getnsc(void);
-Sym*	lookup(void);
-void	main(int, char*[]);
 void	newfile(char*, int);
 void	newio(void);
 void	pushio(void);
-long	escchar(long, int, int);
-Sym*	slookup(char*);
-void	syminit(Sym*);
 void	unget(int);
-int	yylex(void);
-int	Lconv(Fmt*);
-int	Tconv(Fmt*);
-int	FNconv(Fmt*);
-int	Oconv(Fmt*);
-int	Qconv(Fmt*);
-int	VBconv(Fmt*);
-void	setinclude(char*);
+
+// used by dpchk.c
+long	getr(void);
+
+//!!!! (hmmm in lex.c, as well as cinit(), compile())
+void	main(int, char*[]);
+
 
 /*
  * mac.c
  */
 void	dodefine(char*);
 void	domacro(void);
+void	linehist(char*, int);
+void	macexpand(Sym*, char*);
+
+// for dpchk.c
 Sym*	getsym(void);
 long	getnsn(void);
-void	linehist(char*, int);
-void	macdef(void);
-void	macprag(void);
-void	macend(void);
-void	macexpand(Sym*, char*);
-void	macif(int);
-void	macinc(void);
-void	maclin(void);
-void	macund(void);
 
 /*
  * dcl.c
  */
-Node*	doinit(Sym*, Type*, long, Node*);
+//@Scheck: useful, used by cc.y
 Type*	tcopy(Type*);
-Node*	init1(Sym*, Type*, long, int);
-Node*	newlist(Node*, Node*);
+//@Scheck: useful, used by cc.y
+Node*	doinit(Sym*, Type*, long, Node*);
+//@Scheck: useful, used by cc.y
 void	adecl(int, Type*, Sym*);
-int	anyproto(Node*);
 void	argmark(Node*, int);
-void	dbgdecl(Sym*);
-Node*	dcllabel(Sym*, int);
+Node*	dcllabel(Sym*, bool);
 Node*	dodecl(void(*)(int, Type*, Sym*), int, Type*, Node*);
+//@Scheck: useful, used by cc.y
 Sym*	mkstatic(Sym*);
 void	doenum(Sym*, Node*);
 void	snap(Type*);
 Type*	dotag(Sym*, int, int);
 void	edecl(int, Type*, Sym*);
-Type*	fnproto(Node*);
-Type*	fnproto1(Node*);
 void	markdcl(void);
-Type*	paramconv(Type*, int);
+//@Scheck: useful, used by cc.y
 void	pdecl(int, Type*, Sym*);
-Decl*	push(void);
-Decl*	push1(Sym*);
 Node*	revertdcl(void);
+
+// conflict with unix functions when compiled in goken
 #undef round
 #define	round	ccround
 #undef log2
 #define	log2	cclog2
 long	round(long, int);
-int	rsametype(Type*, Type*, int, int);
-int	sametype(Type*, Type*);
+int	log2(uvlong);
+
+bool	sametype(Type*, Type*);
 ulong	sign(Sym*);
 ulong	signature(Type*);
 void	sualign(Type*);
-void	tmerge(Type*, Sym*);
-void	walkparam(Node*, int);
 void	xdecl(int, Type*, Sym*);
 Node*	contig(Sym*, Node*, long);
 
@@ -635,74 +1024,62 @@ Node*	contig(Sym*, Node*, long);
  */
 void	ccom(Node*);
 void	complex(Node*);
-int	tcom(Node*);
-int	tcoma(Node*, Node*, Type*, int);
-int	tcomd(Node*);
-int	tcomo(Node*, int);
-int	tcomx(Node*);
-int	tlvalue(Node*);
+bool	tcom(Node*);
+bool	tcoma(Node*, Node*, Type*, bool);
+bool	tcomo(Node*, int);
 void	constas(Node*, Type*, Type*);
 Node*	uncomma(Node*);
-Node*	uncomargs(Node*);
 
 /*
  * con.c
  */
 void	acom(Node*);
-void	acom1(vlong, Node*);
-void	acom2(Node*, Type*);
-int	acomcmp1(const void*, const void*);
-int	acomcmp2(const void*, const void*);
-int	addo(Node*);
 void	evconst(Node*);
 
 /*
  * funct.c
  */
-int	isfunct(Node*);
+bool	isfunct(Node*);
 void	dclfunct(Type*, Sym*);
 
 /*
  * sub.c
  */
-void	arith(Node*, int);
-int	deadheads(Node*);
+void	arith(Node*, bool);
+bool	deadheads(Node*);
 Type*	dotsearch(Sym*, Type*, Node*, long*);
-long	dotoffset(Type*, Type*, Node*);
-void	gethunk(void);
 Node*	invert(Node*);
 int	bitno(long);
 void	makedot(Node*, Type*, long);
-int	mixedasop(Type*, Type*);
+bool	mixedasop(Type*, Type*);
 Node*	new(int, Node*, Node*);
 Node*	new1(int, Node*, Node*);
-int	nilcast(Type*, Type*);
-int	nocast(Type*, Type*);
+bool	nilcast(Type*, Type*);
+bool	nocast(Type*, Type*);
 void	prtree(Node*, char*);
-void	prtree1(Node*, int, int);
+void	prtree1(Node*, int, bool);
 void	relcon(Node*, Node*);
 int	relindex(int);
+//@Scheck: useful, used by cc.y
 int	simpleg(long);
 Type*	garbt(Type*, long);
 int	simplec(long);
 Type*	simplet(long);
-int	stcompat(Node*, Type*, Type*, long[]);
-int	tcompat(Node*, Type*, Type*, long[]);
+bool	stcompat(Node*, Type*, Type*, long[]);
+bool	tcompat(Node*, Type*, Type*, long[]);
 void	tinit(void);
 Type*	typ(int, Type*);
 Type*	copytyp(Type*);
 void	typeext(Type*, Node*);
 void	typeext1(Type*, Node*);
-int	side(Node*);
+bool	side(Node*);
 int	vconst(Node*);
-int	log2(uvlong);
 int	vlog(Node*);
 int	topbit(ulong);
 void	simplifyshift(Node*);
 long	typebitor(long, long);
 void	diag(Node*, char*, ...);
 void	warn(Node*, char*, ...);
-void	yyerror(char*, ...);
 void	fatal(Node*, char*, ...);
 
 /*
@@ -720,28 +1097,30 @@ void	pickletype(Type*);
  * bits.c
  */
 Bits	bor(Bits, Bits);
-Bits	band(Bits, Bits);
-Bits	bnot(Bits);
 int	bany(Bits*);
 int	bnum(Bits);
 Bits	blsh(uint);
 int	beq(Bits, Bits);
 int	bset(Bits, uint);
+//Bits	band(Bits, Bits);
+//Bits	bnot(Bits);
 
 /*
  * dpchk.c
  */
-void	dpcheck(Node*);
-void	arginit(void);
-void	pragvararg(void);
-void	pragpack(void);
-void	pragfpround(void);
+void dpcheck(Node*);
+void arginit(void);
+
+void pragvararg(void);
+void pragpack(void);
+void pragfpround(void);
 void pragprofile(void);
-void	pragincomplete(void);
+void pragincomplete(void);
 
 /*
  * calls to machine depend part
  */
+//todo: could define an interface instantiated by each xc
 void	codgen(Node*, Node*);
 void	gclean(void);
 void	gextern(Sym*, Node*, long, long);
@@ -758,18 +1137,18 @@ extern	schar	ewidth[];
 /*
  * com64
  */
-int	com64(Node*);
+bool	com64(Node*);
 void	com64init(void);
 void	bool64(Node*);
-double	convvtof(vlong);
-vlong	convftov(double);
-double	convftox(double, int);
 vlong	convvtox(vlong, int);
+//double	convvtof(vlong);
+//vlong		convftov(double);
+//double	convftox(double, int);
 
 /*
  * machcap
  */
-int	machcap(Node*);
+bool	machcap(Node*);
 
 #pragma	varargck	argpos	warn	2
 #pragma	varargck	argpos	diag	2
@@ -781,3 +1160,4 @@ int	machcap(Node*);
 #pragma	varargck	type	"O"	int
 #pragma	varargck	type	"T"	Type*
 #pragma	varargck	type	"|"	int
+/*e: cc/cc.h */

@@ -1,27 +1,6 @@
 #define	EXTERN
 #include "a.h"
 #include "y.tab.h"
-#include <ctype.h>
-
-
-//goken: was partially in a.h before
-enum				/* keep in synch with ../cc/cc.h */
-{
-	Plan9	= 1<<0,
-	Unix	= 1<<1,
-	Windows	= 1<<2,
-};
-int
-systemtype(int sys)
-{
-	return sys&Plan9;
-}
-//goken: was in 6a but not 5a, so let's be consistent
-int
-pathchar(void)
-{
-	return '/';
-}
 
 void
 main(int argc, char *argv[])
@@ -31,15 +10,10 @@ main(int argc, char *argv[])
 
 	thechar = '7';
 	thestring = "arm64";
-
-	ensuresymb(NSYMB);
-
 	memset(debug, 0, sizeof(debug));
 	cinit();
 	outfile = 0;
-	//goken: include[ninclude++] = ".";
-    setinclude(".");
-
+	include[ninclude++] = ".";
 	ARGBEGIN {
 	default:
 		c = ARGC();
@@ -77,21 +51,16 @@ main(int argc, char *argv[])
 		c = 0;
 		nout = 0;
 		for(;;) {
-
-            //goken: I removed myxxx() calls and switched to regular xxx()
-            Waitmsg *w;
-          
 			while(nout < nproc && argc > 0) {
-				i = fork();
+				i = myfork();
 				if(i < 0) {
-					//i = mywait(&status);
-					//if(i < 0)
-                        fprint(2, "fork: %r\n");
+					i = mywait(&status);
+					if(i < 0)
 						errorexit();
-					//if(status)
-					//	c++;
-					//nout--;
-					//continue;
+					if(status)
+						c++;
+					nout--;
+					continue;
 				}
 				if(i == 0) {
 					print("%s:\n", *argv);
@@ -103,16 +72,13 @@ main(int argc, char *argv[])
 				argc--;
 				argv++;
 			}
-			//i = mywait(&status);
-			//if(i < 0) {
-            w = wait();
-            if(w == nil) {
+			i = mywait(&status);
+			if(i < 0) {
 				if(c)
 					errorexit();
 				exits(0);
 			}
-			//if(status)
-            if(w->msg[0])
+			if(status)
 				c++;
 			nout--;
 		}
@@ -125,10 +91,10 @@ main(int argc, char *argv[])
 int
 assemble(char *file)
 {
-	char ofile[100], incfile[20], *p;
+	char *ofile, *p;
 	int i, of;
 
-	strcpy(ofile, file);
+	ofile = strdup(file);
 	p = utfrrune(ofile, pathchar());
 	if(p) {
 		include[0] = ofile;
@@ -136,16 +102,13 @@ assemble(char *file)
 	} else
 		p = ofile;
 	if(outfile == 0) {
-		outfile = p;
-		if(outfile){
+		if(p) {
+			outfile = p;
 			p = utfrrune(outfile, '.');
 			if(p)
 				if(p[1] == 's' && p[2] == 0)
 					p[0] = 0;
-			p = utfrune(outfile, 0);
-			p[0] = '.';
-			p[1] = thechar;
-			p[2] = 0;
+			outfile = smprint("%s.%c", outfile, thechar);
 		} else
 			outfile = "/dev/null";
 	}
@@ -153,14 +116,11 @@ assemble(char *file)
 	if(p) {
 		setinclude(p);
 	} else {
-		if(systemtype(Plan9)) {
-			sprint(incfile,"/%s/include", thestring);
-			setinclude(strdup(incfile));
-		}
+		if(systemtype(Plan9))
+			setinclude(smprint("/%s/include", thestring));
 	}
 
-	//goken: of = mycreat(outfile, 0664);
-    of = create(outfile, OWRITE, 0664);
+	of = mycreat(outfile, 0664);
 	if(of < 0) {
 		yyerror("%ca: cannot create %s", thechar, outfile);
 		errorexit();
@@ -169,11 +129,6 @@ assemble(char *file)
 
 	pass = 1;
 	pinit(file);
-
-    //goken: for goken iar/gopack that use slightly different
-    // object format
-	Bprint(&obuf, "%s\n", thestring);
-
 	for(i=0; i<nDlist; i++)
 		dodefine(Dlist[i]);
 	yyparse();
@@ -181,8 +136,6 @@ assemble(char *file)
 		cclean();
 		return nerrors;
 	}
-
-	Bprint(&obuf, "\n!\n");
 
 	pass = 2;
 	outhist();
@@ -530,11 +483,10 @@ struct
 	"SMSUBL",	LTYPEM,	ASMSUBL,
 	"SMULH",	LTYPE1,	ASMULH,
 	"SMULL",	LTYPE1,	ASMULL,
-	"STLR",	LSTXR,	ASTLR,
-	"STLRB",	LSTXR,	ASTLRB,
-	"STLRH",	LSTXR,	ASTLRH,
-	"STLRW",	LSTXR,	ASTLRW,
-	"STLXP",	LSTXR,	ASTLXP,
+	"STLR",	LTYPE3,	ASTLR,
+	"STLRB",	LTYPE3,	ASTLRB,
+	"STLRH",	LTYPE3,	ASTLRH,
+	"STLRW",	LTYPE3,	ASTLRW,
 	"STLXR",	LSTXR,	ASTLXR,
 	"STLXRB",	LSTXR,	ASTLXRB,
 	"STLXRH",	LSTXR,	ASTLXRH,
@@ -542,8 +494,6 @@ struct
 	"STXR",	LSTXR,	ASTXR,
 	"STXRB",	LSTXR,	ASTXRB,
 	"STXRH",	LSTXR,	ASTXRH,
-	"STXP",	LSTXR,	ASTXP,
-	"STXPW",	LSTXR,	ASTXPW,
 	"STXRW",	LSTXR,	ASTXRW,
 	"SUB",	LTYPE1,	ASUB,
 	"SUBS",	LTYPE1,	ASUBS,
@@ -595,11 +545,6 @@ struct
 	"LDARB",	LTYPE3,	ALDARB,
 	"LDARH",	LTYPE3,	ALDARH,
 	"LDARW",	LTYPE3,	ALDARW,
-
-	"LDXP",	LTYPE3,	ALDXP,
-	"LDXPW",	LTYPE3,	ALDXPW,
-	"LDAXP",	LTYPE3,	ALDAXP,
-	"LDAXPW",	LTYPE3,	ALDAXPW,
 
 	"LDAXR",	LTYPE3,	ALDAXR,
 	"LDAXRB",	LTYPE3,	ALDAXRB,
@@ -1077,5 +1022,6 @@ outhist(void)
 	}
 }
 
-#include "../../src/cmd/cc/lexbody"
-#include "../../src/cmd/cc/macbody"
+#include "../../compilers/cck/lexbody"
+#include "../../compilers/cck/macbody"
+#include "../../compilers/cck/compat"

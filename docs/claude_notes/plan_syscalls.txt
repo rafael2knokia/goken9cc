@@ -1,0 +1,773 @@
+Plan: what lib_core/libc/syscall/ should grow next, and with which numbers
+===========================================================================
+
+Unlike every other file in docs/claude_notes/ (which record done,
+verified work -- see CLAUDE.md), this one is deliberately forward
+looking: it is the analysis behind *which* syscalls lib_core/libc/
+should add after the initial read/write/open/close/lseek/exit set, in
+what order, and with which numbers on each of the 11 OS/arch
+combinations this tree targets. It exists so the next session doesn't
+have to re-derive the ordering or re-transcribe the number tables.
+
+Hence the plan_ prefix rather than notes_. Two things in here are NOT
+plans but findings, and are called out as such: a latent riscv32
+lseek bug (see "Found along the way"), and the Darwin arm64-vs-amd64
+stat divergence. Both were discovered while assembling the tables. The
+riscv32 one has since been fixed and reproduced -- see
+notes_arch_riscv.txt; that section is kept only as the record of how it
+was found.
+todo.org remains the authority for project-wide priorities; this file
+only orders the syscall work itself.
+
+Provenance of every number below
+------------------------------------------------------------------------
+
+Numbers were taken from primary sources, not from memory, because the
+five different numbering conventions in play here (classic UNIX,
+Linux/amd64, Linux/mips-o32, asm-generic, Plan9) agree just often
+enough to make a guessed number look plausible and still be wrong:
+
+- Linux 386, amd64, arm(EABI), mips(o32): the kernel's own tables,
+  arch/{x86/entry,arm/tools,mips/kernel}/syscalls/syscall_*.tbl.
+- Linux arm64, riscv, riscv64: scripts/syscall.tbl plus
+  include/uapi/asm-generic/unistd.h (for the __NR3264_* aliases), and
+  cross-checked against this host's /usr/include/asm-generic/unistd.h
+  (the dev box is aarch64, so those resolve natively).
+- Darwin amd64/arm64: GO/pkg/syscall/zsysnum_darwin_amd64.go in this
+  tree -- the same 2010-era Go snapshot syscall/os/darwin/ already
+  patterns itself on. Note this predates arm64 macOS entirely; the
+  BSD table is arch-independent so the numbers carry over, but see
+  the stat caveat below, and treat anything NOT in that file
+  (__getcwd=296 in particular) as unverified.
+- Plan9: lib_core/libc/syscall/os/plan9/sys.h, in-tree and
+  authoritative (kept in sync with principia).
+
+Where a number below is not from one of those, it says so.
+
+State as of this writing
+------------------------------------------------------------------------
+
+Six calls, everywhere:
+
+  Linux (386 amd64 arm arm64 mips riscv riscv64)
+  Darwin (amd64 arm64)          read write _sysopen close lseek exit
+  Plan9 (arm mips)              open close pread pwrite seek exits
+                                (raw stubs) + read/write/exit (C wrappers)
+
+Everything else declared in include/os/*.h -- brk/sbrk, create,
+remove, dup, stat/fstat, access, getwd, pipe, exec, fork/rfork,
+await/wait, getpid, time, sleep -- has no implementation in the
+self-hosted libc. They resolve today only in the gcc-built BOOT/lib9,
+which is exactly the layer self-hosting is meant to stop depending on.
+
+UPDATE: TIER 2 IS DONE. create/remove/chdir landed first, then
+access/dup, on all 11 OS/arch combinations (windows gets everything but
+dup -- see todo.org). Verified by tests/c/hello_libc/dir.c and fd.c.
+Along the way create() also grew DMDIR support (mkdir/mkdirat) and
+remove() grew rmdir, since Plan9's remove deletes directories too. The
+outcome, including three real bugs the new tests exposed -- a mips o32
+error-convention bug, a riscv32 llseek bug, and an inverted Plan9 seek
+write-back plus a 5i stack-offset bug -- is written up in
+notes_libc_selfhost.txt, notes_arch_mips.txt, notes_arch_riscv.txt and
+notes_abi_plan9.txt. The Tier 2 section below is left as-is for its
+number tables. Tier 1 (sbrk/brk) is now the next thing, and remains the
+only item actually blocking something. Everything above and in the
+other tiers is unchanged.
+
+On "the missing low numbers"
+------------------------------------------------------------------------
+
+Worth writing down because the answer differs per table, and the
+question ("we handle 2,3,4,6 -- what about 1?") is ambiguous by table:
+
+- Classic UNIX table (Linux/386, Linux/arm, and Darwin all share it):
+  we have 1=exit, 3=read, 4=write, 5=open, 6=close, 19=lseek. The one
+  missing low number is 2=fork. Next cluster: 7=wait4, 8=creat,
+  10=unlink, 12=chdir, 20=getpid.
+- Plan9 sys.h: we have 3=EXITS, 6=OPEN, 7=CLOSE, 10=PREAD, 11=PWRITE,
+  12=SEEK. Missing low: 1=RFORK, 2=EXEC, 4=AWAIT, 5=BRK, 8=DUP,
+  9=FD2PATH, then 13=CREATE, 14=REMOVE, 15=CHDIR, 16=STAT, 17=FSTAT.
+  So "number 1" only has a meaningful answer in this table: RFORK.
+- asm-generic (arm64, riscv, riscv64) has no low numbers at all --
+  the table starts at openat=56. Do not reason about "the next
+  number" on these arches; there is no classic ordering to extend.
+
+Tier 1: sbrk/brk -- the only item actually blocking something
+------------------------------------------------------------------------
+
+UPDATE: TIER 1 IS DONE, for linux (all 7 arches), plan9 (arm/mips) and
+darwin (built and linked, not executed -- no macOS host here). windows
+is the one gap left, same as dup's. The recommendation below to make
+sbrk() the portable primitive is what was actually implemented; the
+write-up, including why that layering is not merely a preference, lives
+in notes_libc_selfhost.txt's "sbrk (Tier 1)" section. Two things found
+along the way are recorded elsewhere rather than here: uintptr was 4
+bytes on amd64/arm64 (tests/c/regressions/uintptr_width.c), and qemu
+implements brk itself so its refusal behavior is not the kernel's
+(notes_test_infra.txt). The numbers below were all confirmed against
+the kernel tables before use and are correct as written.
+
+port/minimal_malloc.c says it in its own header comment: it is a 64MB
+`static char heap[]` bump allocator with a no-op free(), and the plan
+is to replace it with principia's pool.c. pool.c cannot be ported
+until libc can grow the heap, so this is the true critical path, not
+merely the most-used call. 19 files in the toolchain already reference
+brk/sbrk.
+
+The wrinkle: there is no usable brk on macOS. SYS_break=17 is
+vestigial and fails on modern macOS. So this one call needs two
+backends.
+
+  arch                        number
+  Linux 386 / arm             brk = 45
+  Linux amd64                 brk = 12
+  Linux arm64/riscv/riscv64   brk = 214
+  Linux mips (o32)            brk = 4045
+  Darwin amd64 / arm64        mmap = 197, munmap = 73  (no brk!)
+  Plan9 arm / mips            BRK = 5
+
+Recommendation: make sbrk() the portable primitive rather than
+exposing brk in the Plan9 API shape everywhere -- brk-backed on
+Linux/Plan9, mmap(MAP_ANON)-backed on Darwin. mmap is 6-arg, which the
+existing _syscall6 trampoline already handles with no new assembly on
+any arch.
+
+Two mmap traps if the Darwin path is later mirrored on Linux:
+- Linux 386/arm must use mmap2 (192 on both), not mmap (90): the
+  latter is old_mmap and takes a *struct pointer*, not 6 registers.
+  mmap2's offset is in pages, not bytes.
+- On 32-bit asm-generic (riscv32) the number 222 is mmap2, not mmap
+  -- same number, page-granular offset. See the riscv32 section.
+
+Tier 2: the near-free file calls (create, remove, access, dup, chdir)
+------------------------------------------------------------------------
+
+Highest value per line in the whole list: create is used in 29
+toolchain files, remove in 28, dup in 9, access in 6. And on Unix
+create needs no new syscall number at all -- it is
+_sysopen(path, O_WRONLY|O_CREAT|O_TRUNC, perm), pure flag translation
+in a new os/$GOOS/create.c exactly parallel to the existing
+os/linux/open.c. Same trick retires several rows below.
+
+               386/arm       amd64      arm64/riscv*   mips(o32)   Darwin      Plan9
+  create       (reuse open)  (reuse)    (reuse openat) (reuse)     (reuse)     CREATE = 13
+  remove       unlink   10   unlink 87  unlinkat  35   4010        unlink 10   REMOVE = 14
+  dup          dup2     63   dup2   33  dup3      24   4063        dup2   90   DUP    = 8
+  access       access   33   access 21  faccessat 48   4033        access 33   (open/STAT)
+  chdir        chdir    12   chdir  80  chdir     49   4012        chdir  12   CHDIR  = 15
+
+Plan9's dup(int,int) is already dup2-shaped, which is why the Unix
+column is dup2/dup3 and not bare dup. arm64/riscv have no dup2 and no
+unlink at all -- dup3(old,new,0) and unlinkat(AT_FDCWD,path,0) are the
+substitutes, same as openat already stands in for open there.
+
+CORRECTION, from actually implementing it: "already dup2-shaped" is
+only half true, and the table above is short a column because of it.
+Plan9's dup(oldfd, newfd) takes newfd == -1 to mean "lowest free
+descriptor", so it needs BOTH POSIX forms -- plain dup as well as
+dup2/dup3 (principia's sysdup() splits on exactly that). dup is 41 on
+386/arm, 4041 on mips, 32 on amd64, 41 on Darwin, 23 on the generic
+ABI. Likewise the access row's Plan9 entry "(open/STAT)" understates
+things: Plan9 has no access(2) syscall at all, so it needs a real libc
+function there (os/plan9/access.c), not a syscall number.
+
+Tier 3: the stat family (the expensive one)
+------------------------------------------------------------------------
+
+UPDATE: TIER 3 IS DONE, for linux (386/amd64/arm/arm64/mips/riscv64,
+not riscv32 -- see below), darwin (amd64/arm64, unverified -- no macOS
+host here) and windows (amd64, unverified, mode-setting only implemented
+partially -- see below), and plan9 (arm/mips, guest side only -- see
+below). The design that actually shipped differs from this section's
+original plan in one real way: dirstat()/dirwstat() (by PATH) are not
+per-GOOS/arch at all. Only dirfstat()/dirfwstat() (by FD) are -- every
+real caller in this tree (linkers/ar/ar.c, debuggers/acid/) already only
+ever used the Dir*-returning calls, never a raw byte-buffer stat/fstat,
+so dirstat()/dirwstat() are now portable wrappers (port/dirstat.c,
+port/dirwstat.c) built on open()+dirfstat()/dirfwstat()+close(). That
+also means the raw machine-independent-buffer stat()/fstat()/wstat()/
+fwstat() this section originally planned as a portable primitive
+everywhere are NOT exposed outside Plan9: on linux/darwin/windows,
+dirfstat()/dirfwstat() build a Dir straight from that OS's native
+kernel struct, no wire-format marshal step at all -- only Plan9 (where
+FSTAT/FWSTAT genuinely speak that wire format) needs convM2D/convD2M
+(ported from principia's lib_core/libc/9sys/, now
+lib_core/libc/os/plan9/{convM2D,convD2M}.c). Full design writeup and the
+per-arch struct-layout sourcing (GO/pkg/syscall/ztypes_linux_*.go for
+386/amd64/arm, this host's own /usr/include/asm-generic/stat.h for
+arm64/riscv64, a fetched arch/mips/include/uapi/asm/stat.h for mips,
+GO/pkg/syscall/ztypes_darwin_amd64.go for both darwin arches) is in
+notes_libc_selfhost.txt's own Tier 3 section. Verified end to end (not
+just compiled) for every Linux arch except riscv32 via a manual
+create+dirfstat+dirfwstat(mode)+dirfstat+dirstat+dirstat(".") check,
+both natively (amd64, arm64 -- this dev box) and under qemu (386, arm,
+mips, riscv64), and via the real tests/c/hello_libc/stat.c now wired
+into `mk test`'s ARCHS loop. Darwin/Windows are compiled+linked only, no
+host to run them on, same epistemic status as every other os/darwin and
+os/windows file added without one.
+
+Two real, deliberately-scoped gaps, not oversights:
+- riscv32 gets no stat file at all -- see this section's own original
+  note below, now confirmed rather than merely predicted: scripts/
+  syscall.tbl really does mark fstat/newfstatat 64-bit-only, so rv32
+  would need statx(2), a materially bigger struct this pass didn't
+  write. numbers_riscv.h documents the gap in place.
+- dirfwstat() implements mode+length on every arch except: mips (mode
+  only -- o32's ftruncate64 needs a register-pair-aligned argument
+  layout this pass didn't want to guess at, see numbers_mips.h) and
+  windows (length only -- Win32 has no by-HANDLE chmod equivalent, only
+  a by-PATH one a bare fd/HANDLE can't reach, see os/windows/stat.c).
+  mtime-setting is unimplemented EVERYWHERE (no caller needs it yet) --
+  see any dirfwstat()'s own comment.
+
+Also found and fixed along the way, unrelated to the libc side but
+blocking it from being testable at all: machines/5i's sysstat()/
+sysfstat() (syscall_posix.c) used to flat-out SEGFAULT the emulator
+itself the moment anything called STAT/FSTAT under it -- not a guest-
+side bug, a host-side one (reg.r[REGARG] and reg.r[REGRET] are the same
+ARM register per arm.h, and sysfstat()'s own "reg.r[REGRET] = -1"
+clobbered it before a later debug Bprint read reg.r[REGARG] back as a
+sysctab[] index, landing on sysctab[0xffffffff]). Fixed to fail cleanly
+instead (both functions are still TODO stubs -- STAT/FSTAT are not
+actually served by 5i/vi yet, so a Plan9 binary reaching either one
+still gets no real answer, just no longer a crash). This is a NEW,
+separate gap from the one below, tracked in todo.org.
+
+fstat is what fopen/stdio, libbio sizing, ar, and mk's dependency
+timestamps all ultimately want. The syscall is the easy half: Plan9's
+stat returns a 9P stat buffer that dirstat() unpacks into a Dir, while
+Unix returns struct stat. That translation is already written and
+working in BOOT/lib9/_p9dir.c plus dirstat.c/dirfstat.c -- porting
+those is most of the work, and the trampoline entry is trivial.
+
+               386/arm         amd64      arm64/riscv64   mips(o32)      Plan9
+  stat         stat64    195   stat    4  newfstatat  79  4213 stat64    STAT  = 16
+  fstat        fstat64   197   fstat   5  fstat       80  4215 fstat64   FSTAT = 17
+
+  Darwin arm64:  stat = 188, fstat = 189
+  Darwin amd64:  stat64 = 338, fstat64 = 339
+
+Three traps in that table, all of which fail silently rather than
+loudly:
+
+- 32-bit Linux must use the *64 variants (195/197, 4213/4215), never
+  106/108. Otherwise off_t/ino_t truncate -- the same class of bug as
+  the lseek/vlong one already fixed in 8bbdbab5a.
+- Darwin arm64 and amd64 genuinely differ here, for the first time
+  between those two files. arm64 macOS postdates the stat64
+  unification, so stat=188 already carries the 64-bit struct; x86_64
+  macOS must call stat64=338. Do not copy numbers_darwin_arm64.h's
+  stat rows into the amd64 file.
+- riscv32 has no fstat and no newfstatat at all: 79/80 are 64-only in
+  scripts/syscall.tbl. It must use statx (291, common to both). See
+  below.
+
+Tier 3.5: dirread/dirreadall -- listing a directory
+------------------------------------------------------------------------
+
+UPDATE: DONE for linux (getdents64 + openat per entry, all arches
+except riscv32) and plan9 (native read()-of-a-directory + convM2D,
+ported near-verbatim from principia). NOT done for darwin (needs BSD
+getdirentries64, a different shape from Linux's call) or windows (needs
+FindFirstFileA/FindNextFileA) -- deliberately deferred, tracked in
+todo.org, not a silent gap. Landed right after Tier 3 specifically to
+unlock utilities/files/ls.c, which dirstat()/dirfstat() alone cannot
+serve (they answer "what is this ONE named thing", not "what's in this
+directory"). Full design, the mips-endianness trap avoided (a real
+typed struct instead of manual byte-shifting for getdents64's
+d_reclen), and the further ls.c porting work this surfaced (a real 6c
+parser bug around the `ord` typedef, an orphaned include/base/ord.h
+never wired into libc.h, stale ORD__EQ-style names, and a still-missing
+ctime()) are all in notes_libc_selfhost.txt's own Tier 3.5 section.
+
+UPDATE: the ctime() gap above is now fixed too (gmtime/localtime/
+asctime/ctime/tm2sec, none of which are syscalls -- port/ctime.c,
+port/tm2sec.c, pure C plus one best-effort open() of a Plan9-shaped
+config file). Full story in notes_libc_selfhost.txt's own "gmtime/
+localtime/asctime/ctime/tm2sec" section, not repeated here since none
+of this tier system's per-arch syscall-number tables apply to it.
+UPDATE: ls.c now compiles, links, AND RUNS correctly (plain ls, ls
+<dir>, and ls -l all verified against a real qemu run) -- utfrrune()
+(was implemented but never wired into UTFOFILES, and used a Go-era
+const/Rune signature this compiler can't be trusted with), strrchr()
+and strncpy() (didn't exist at all), atexit() (declared in
+include/os/proc.h, didn't exist -- port/atexit.c, port/exits.c's new
+atexitrun() seam), and dirmodefmt() (the %M fmtinstall() verb ls -l
+needs, whose absence caused a real vararg-desync segfault, not a link
+error) are all now implemented, mostly as plain copies of principia's
+own port/9sys files per this session's own "prefer principia code
+as-is" instruction. Full story in notes_libc_selfhost.txt's own
+"utfrrune()/strrchr()/strncpy()/atexit()/dirmodefmt()" section. One
+remaining real gap: atexit()-registered callbacks never run on plan9,
+since that GOOS's exits(char*) is a raw EXITS syscall bypassing the
+new atexitrun() hook entirely -- tracked in todo.org, not a syscall-
+number problem so not detailed here either.
+
+UPDATE: chmod/mkdir/touch/wc/mv/du/rm/cp all now compile, link, and
+run correctly too (strtol family, cleanname, cistrcmp, mallocz, the
+errstr/rerrstr/werrstr family, and a real renameat2(2) call for
+dirwstat()'s Dir.name rename support -- the one genuine NEW syscall
+this round, added uniformly across all 6 Linux arches; verified
+numbers against the kernel's own syscall_*.tbl/unistd.h, not memory).
+Full story, including two real bugs found but deliberately NOT fixed
+(a 7l arm64 backend bug and a tree-wide "-1 vs raw errno" convention
+gap), in notes_libc_selfhost.txt's own "Round 2" section.
+
+Tier 4: process control -- the actual self-hosting milestone
+------------------------------------------------------------------------
+
+UPDATE: fork()/exec()/execl()/wait()/pipe() are DONE for linux, all 6
+arches this file otherwise treats as "done" (386/amd64/arm/arm64/mips/
+riscv64) -- rv32 stays a deliberate gap, see below. Darwin/plan9/windows
+are unchanged (still not started); kill() also stays unimplemented
+(number recorded in numbers_*.h but no caller needed it this round, so
+no port/kill.c was added -- avoid the temptation to assume it exists).
+
+The design that shipped matches this section's own table almost
+exactly, with one addition the table doesn't show: every raw syscall
+stays _sys-prefixed (_sysfork, _sysexecve, _syswait4, _syspipe) and is
+bridged to its public Plan9-shaped name by a NEW port/*.c file (fork.c,
+exec.c, execl.c, wait.c, pipe.c) rather than decl-generated straight to
+the public name the way getpid()/chdir()/access() are. Reason: fork()
+and pipe() need their raw -errno failure result normalized to Plan9's
+exact -1 (see port/fork.c's own comment) -- compilers/pcc/pcc.c's own
+`switch(fork()){case -1: ...}` is an exact-match switch that a raw
+-errno would silently miss, landing in the wrong (parent) branch
+instead of reporting failure. This is the same class of bug
+todo.org's own "-1 vs raw errno" gap already names elsewhere in this
+tree; Tier 4 deliberately does not add a new instance of it.
+
+arm64/riscv64 needed real substitution shims, not just decl entries:
+fork() is clone(SIGCHLD,0,0,0,0) (this ABI dropped plain fork(), same
+story as its already-missing open()/dup2()) and pipe() is pipe2(fd,0)
+(this ABI dropped plain pipe() too) -- both hand-written in
+syscall_linux_{arm64,riscv64}.h, exactly parallel to that file's
+existing _sysopen()-over-openat() shim. mips needed the SAME pipe2
+substitution but for a different reason: numbers_mips.h's own comment
+explains why o32's real sys_pipe (sysm_pipe) can't go through the
+generic _syscall6 trampoline at all -- it returns the two fds directly
+in $v0/$v1, not through the pointer argument. wait4 is exactly 4 raw
+args (pid, status, options, rusage) on every arch, which matters on
+mips specifically: that is the most args svc_mips.s's trampoline can
+carry in registers before a syscall would need its 5th/6th argument
+passed on the stack (not implemented) -- confirmed by reading the
+assembly, not assumed, before writing the .decl entry.
+
+exec()'s envp comes from port/mainargs.c's _mainargv (the same source
+port/getenv.c already reads) via a small file-static walk duplicated
+in port/exec.c rather than shared -- four lines, not worth a new
+cross-file API surface for. execl() is a plain two-pass variadic-argv
+builder over exec(), copied in spirit from BOOT/lib9/execl.c.
+wait()'s Waitmsg construction is a smaller version of BOOT/lib9/
+await.c's own _wait(): same WIFEXITED/WEXITSTATUS-into-w->msg
+conversion (a nonzero exit becomes msg="42"-shaped, matching
+port/exits.c's own already-lossy msg-to-0/1 collapse -- the original
+exits(char*) STRING can never survive a real Unix exit(2) boundary,
+same limitation BOOT/lib9 already has), but without BOOT's full
+SIGxxx-name table (this tree has no <signal.h> equivalent at all --
+WTERMSIG's raw number is used directly instead) and without filling
+Waitmsg.time[] from rusage (passed nil; no caller reads it yet).
+
+Verified END TO END, not just compiled: tests/c/hello_libc/fork.c
+(new) exercises all three real shapes compilers/pcc/pcc.c needs --
+fork()+wait(), fork()+exec()+wait(), and pipe()+fork()+wait() -- and
+was run for real under qemu-user for all 6 arches (native execution
+for the two the dev host can run directly, qemu-user for the rest),
+matching byte-for-byte against fork_expected.txt every time, including
+the exec() half genuinely re-exec'ing the running binary (proof
+_sysexecve's argv/envp marshaling is correct, not merely that the
+syscall didn't fault) and the pipe() half reading back exactly what a
+forked child wrote to confirm the two fds are really connected. Also
+functioned as a real bug-finder, the way earlier tiers' tests did: an
+off-by-one in the TEST itself (writing a string literal's length
+including its trailing NUL byte, not just the visible characters) was
+caught by an exact cmp mismatch on the first amd64 run, not silently
+passed -- see the fix in git history, not repeated here since it was a
+test bug, not a libc one.
+
+riscv32 (numbers_riscv.h) is a deliberate, documented gap, not
+silently skipped: clone/execve are unconditional there too and would
+work, but wait4 is gated exactly like stat's fstat/newfstatat was
+(`#if defined(__ARCH_WANT_TIME32_SYSCALLS) || __BITS_PER_LONG != 32`,
+which riscv never satisfies at 32 bits) -- only waitid (a different,
+siginfo_t-shaped struct) is available, and rather than ship fork/exec
+without a matching wait, this whole tier was left out for rv32 as one
+gap. lib_core/libc/mkfile's PROCOFILES excludes $cputype riscv up
+front for exactly this reason (checked first, same style as
+STATOFILES's own riscv carve-out), and
+tests/c/hello_libc/mkfile excludes fork.exe from that one arch's run
+the same way stat.exe/dirread.exe already are, for their own unrelated
+reason.
+
+Found along the way, and since fixed in a later pass (see todo.org's
+own "DONE: mips _sysrenameat2's 5th argument was silently dropped"):
+syscall_linux_mips.decl's own _sysrenameat2 (added for Tier 3.5's
+dirwstat(), see that section) declares 5 arguments, but svc_mips.s's
+trampoline only ever wired 4 into registers (a1..a4 -> R4..R7) --
+found by reading the assembly while checking wait4 fit inside that
+same limit, not introduced by Tier 4 itself. svc_mips.s now stores
+a5/a6 to the kernel's own expected $sp+16/$sp+20 before SYSCALL,
+verified with a real RENAME_NOREPLACE round-trip.
+
+UPDATE (round 2): darwin (amd64+arm64) and plan9 (arm+mips) are now
+DONE too, and windows is partially done. The single biggest surprise:
+port/fork.c/exec.c/execl.c/wait.c/pipe.c (the five files round 1 wrote
+for linux) turned out to be REUSABLE UNCHANGED for darwin -- they only
+ever call raw _sysfork()/_sysexecve()/_syswait4()/_syspipe() names,
+never anything linux-specific, so once syscall/os/darwin/ supplies
+those four names the same C source just works. _sysexecve/_syswait4
+are ordinary decl-generated wrappers there (same numbers as this
+section's own table below, confirmed against a local darwin-xnu
+source checkout's bsd/kern/syscalls.master rather than re-guessed).
+_sysfork/_syspipe needed real hand-written asm in svc_{amd64,arm64}.s:
+that same syscalls.master marks both fork(2) and wait4(2)
+NO_SYSCALL_STUB (no automatic libSystem wrapper -- Apple's own libc
+hand-writes custom assembly for them too, confirming the dual-register
+convention below is real, not a hedge), and pipe(2)'s own prototype in
+that file is `{ int pipe(void); }` -- genuinely zero arguments, proving
+both fds really do come back purely through registers. Compile+link
+checked (a real fork.c consumer resolves against the new symbols, not
+just that libc.a itself builds) but UNVERIFIED ON REAL HARDWARE -- no
+macOS host here, same status as the rest of os/darwin/.
+
+plan9 needed real new code (os/plan9/fork.c, os/plan9/wait.c,
+port/tokenize.c), but all three are plain ports of principia-
+softwarica's own real reference implementation (9sys/fork.c,
+9sys/wait.c, port/tokenize.c) rather than derived from scratch --
+fork() is literally rfork(RFPROC|RFFDG|RFREND), and wait() parses
+await(2)'s "pid utime stime rtime msg" text response via tokenize().
+rfork/exec/await/pipe themselves are raw asm stubs needing no C bridge
+at all (same story as open/dup/brk already have on this GOOS -- the
+raw syscall IS the public API shape). VERIFIED END TO END, not just
+compiled, for pipe() specifically: machines/5i's and machines/vi's own
+syspipe() genuinely call the host's real pipe() (unlike sysrfork()/
+sysexec()/sysawait(), all still TODO stubs in both emulators -- see
+todo.org's own gap entry) -- confirmed via a new tests/c/hello_libc/
+pipe.c run under both emulators, byte-for-byte. fork.exe itself is
+still built (proving the whole chain compiles+links) but not run, same
+"kept buildable" treatment Tier 3's stat.exe/dirread.exe got before
+their own emulator gap was found and partially fixed.
+
+windows got pipe() for real (CreatePipe, a faithful primitive with no
+compromise -- verified: links, and is the one Tier-4 windows piece
+actually wired into test_windows's run+assert list) and exec()/execl()
+as a deliberately DIFFERENT design, not a port of anything: CreateProcessA
++ a blocking WaitForSingleObject + GetExitCodeProcess + this process's
+own exit(). That is the only way to keep exec()'s "never returns on
+success" contract honest without a real fork() -- CreateProcessA spawns
+a genuinely separate process, so the sole way this process can behave
+as if it "became" that command is to wait for it and adopt its exit
+code, mirroring what MSVCRT's own real _execve() does for the same
+reason. fork() and wait() are NOT approximated here, they are simply
+absent: there is no address-space-duplication primitive on Windows at
+all (Cygwin's own fork() needs a whole-system fixed-load-address
+scheme plus ReadProcessMemory/WriteProcessMemory to clone one, a
+fundamentally bigger project than a libc syscall wrapper), and a
+standalone wait() has nothing left to wait for once exec() already
+waited internally, inside the SAME process, before ever returning to
+its own caller. compilers/pcc/pcc.c's actual fork()+exec()+wait()
+pattern therefore still cannot run end to end on windows -- a
+permanent, architecture-shaped gap, not a TODO. One process-adjacent
+lesson worth keeping: linkers/lk/pe.c's importfuncs[] is compiled
+separately into BOTH 6l and 8l (not a shared library), so adding the
+new CreatePipe/CreateProcessA/WaitForSingleObject/GetExitCodeProcess
+imports needed both linkers rebuilt before a windows link would
+actually resolve them -- caught by linking a real consumer, not
+assumed from the diff.
+
+Tier 6: notification (notify/noted/atnotify/postnote) -- unblocks mk/rc/tee/ed self-hosting
+------------------------------------------------------------------------
+
+Plan9 side DONE (arm/mips) -- see notes_libc_selfhost.txt's matching
+Tier 6 entry for what was built and its verification status (build-
+verified only, not runtime-verified: machines/5i/vi don't actually
+deliver notes, a pre-existing emulator gap, same category as Tier 4's
+own fork/exec/wait one).
+
+Linux side DONE too, all 7 arches, runtime-verified under qemu-user
+via a real tests/c/hello_libc/notify.c (see notes_libc_selfhost.txt's
+"Tier 6: notification, Linux side" entry for the full story --
+sigaction()/kill() as real raw syscalls, and a genuinely per-arch
+"sigentry" bridging trampoline whose necessity and shape varied more
+than any other tier in this file, found only by testing each arch
+individually rather than assumed uniform).
+
+darwin side: postnote() ONLY, DONE and compile+link verified (both
+amd64 and arm64, real Mach-O binaries). notify()/noted() (installing
+the actual signal handler) deliberately NOT attempted -- see
+notes_libc_selfhost.txt's "Tier 6: notification, darwin side" entry
+for why this is a different KIND of gap than every other darwin round
+in this project: not just "unverified without hardware" (postnote()
+IS build+link verified despite that), but a real, unresolved design
+question (XNU's raw sigaction(2) needs a userspace sa_tramp
+trampoline whose modern necessity is genuinely ambiguous from public
+sources, and there is no qemu-user Darwin emulation to fall back on
+the way every Linux arch had for this tier).
+
+Surfaced building a real, build-verified survey of what utilities/,
+mk/, and rc/ still need to self-host (not guessed from headers --
+every item below comes from an actual `mk objtype=amd64` attempt
+against goken's own 6c/6l and lib_core/libc, collecting real
+"undefined:"/"not declared"/"no such file" output). Two independent
+things block self-hosting mk (and, by extension, rc, and a few
+utilities/): environment enumeration (see Tier 7 below) and this
+notification family. This tier is the more tractable of the two --
+almost the exact same shape as Tier 4's RFORK/EXEC/AWAIT/PIPE work.
+
+include/os/plan9/note.h ALREADY declares the full API (noted/notify/
+postnote/atnotify, NCONT/NDFLT/NSAVE/NRSTR, PNPROC/PNGROUP) but is not
+`#include`'d from libc.h at all -- the same "declared, never wired in"
+shape Tier 4's os/ipc.h and this project's own utfrrune()/runestrlen()
+history already hit repeatedly. syscall/os/plan9/sys.h already has the
+two raw syscall numbers too: NOTIFY=25, NOTED=26 (same table RFORK/
+EXEC/AWAIT/PIPE came from).
+
+Real, current blockers this would unblock, confirmed by attempting
+each self-hosted build directly:
+- mk/Plan9.c: catchnotes()/expunge() call atnotify()/postnote()
+  directly; Exit()/notifyf() reference PNPROC. This is the LAST gap in
+  mk/Plan9.c specifically -- every other call it makes (rfork/fork/
+  pipe/execl/dup/wait/dirstat/dirwstat/nulldir/access/create/waitpid)
+  already works against this libc as of the Tier 4 and utilities/
+  self-hosting rounds.
+- utilities/pipe/tee.c: `atnotify(intignore, true)` directly.
+- utilities/text/misc/ed.c: `noted(NCONT)`/`noted(NDFLT)` directly.
+
+Plan9 side: mechanically small, ported from principia almost verbatim
+(lib_core/libc/9syscall/notify.s, noted.s -- both trivial one-arg-spill
+raw stubs, SAME shape as RFORK/EXEC/AWAIT/PIPE's own svc_$cputype.s
+additions; port/atnotify.c -- pure portable C, a static NFN-slot
+function-pointer table plus one `notify(notifier)` registration call,
+no per-arch trampoline complexity needed since the KERNEL handles
+transferring control to the registered handler on a real note, unlike
+Unix's own signal-delivery convention; 9sys/postnote.c -- a plain
+write() to /proc/PID/note, no syscall of its own at all, matching this
+tier's own "Plan9 needs far fewer syscalls than the table suggests"
+precedent from Tier 4).
+
+Linux/darwin side: NOT mechanically small -- there is no Plan9-shaped
+notify/postnote primitive on either GOOS at all. The kernel-level
+equivalent is the POSIX signal family (signal(2)/sigaction(2) to
+register a handler, kill(2) to send one) -- a real, currently
+unimplemented syscall pair (numbers already recorded and then
+deliberately dropped from the Tier 4 commit as unused at the time; see
+that tier's own git history) plus a real design question: does a
+Linux/darwin atnotify()/postnote()/noted() get built as a compat shim
+over signal()/kill() (letting tee.c/ed.c/a future mk variant call the
+exact same Plan9-shaped API on every GOOS), or does this stay a
+Plan9-only family with linux/darwin callers routed to a different,
+GOOS-native mechanism instead? Not resolved here -- this is the same
+open question Tier 7 (mk/rc self-hosting) already raises for readenv()/
+exportenv(), and probably wants answering once for both, not twice
+
+UPDATE: the readenv()/exportenv() side of that open question is now
+partly answered -- see notes_libc_selfhost.txt's "environ()/putenv(),
+all 4 GOOS" entry. environ()/getenv()/putenv() (not a Plan9-shaped
+virtual-/env abstraction) is the API all 4 GOOS now have real
+implementations of; mk/Plan9.c's own readenv()/exportenv() have NOT
+been rewired to use them yet, deliberately out of scope for that round.
+(the user's own suggestion: a THIRD variant file per program --
+"goken.c" -- that reuses mk/Plan9.c's/rc/unix.c's already-working
+process-control code nearly verbatim, links against this libc same as
+Plan9.c does today, and only swaps in POSIX-native environ-walking and
+signal()-based notification for the two genuinely Plan9-specific
+pieces). Whichever program adopts a goken.c would also need its own
+mkfile's OFILES list turned from the current hardcoded single choice
+("Posix.$O below not Plan9.$O!", mk/mkfile's own comment) into an
+$objtype-conditional pick, the same `if(~ $objtype boot-gcc
+boot-clang) echo Posix.$O; if not echo goken.$O`-shaped selection
+lib_core/libc/mkfile's own $GOOS-conditional OFILES groups already use
+throughout -- not just adding the new file, but wiring it in.
+
+See docs/claude_notes/notes_libc_api_design.txt's own "Notes vs.
+signals" section for a fuller possible-middle-ground writeup (split
+notify() itself, left Plan9-only, from atnotify()/postnote()/noted(),
+proposed as a real cross-GOOS layer) -- not implemented, just the
+design reasoning banked for whenever this tier's Linux/darwin half
+gets picked up.
+
+UPDATE: the goken.c idea above is now real, for mk (not rc yet) -- see
+notes_libc_selfhost.txt's "mk self-hosting, Linux fully verified +
+darwin compile/link-only" entry. Turned out to need a further split
+beyond one goken.c: notifyf()/catchnotes()/expunge() moved into three
+tiny GOOS-selected files (notify_full.c/notify_partial.c/
+notify_none.c) because notify()/noted()/postnote() support isn't
+uniform across linux/darwin/windows (exactly the gap this tier's
+darwin/windows entries above already predicted), so goken.c itself
+couldn't call them unconditionally without failing to link on two of
+the three GOOSes it targets.
+
+Tier 7: setjmp/longjmp -- unblocks utilities/byte self-hosting, a libregexp-wide dependency
+------------------------------------------------------------------------
+
+DONE, all 7 arches -- see docs/claude_notes/notes_libc_selfhost.txt's
+own "Tier 7: setjmp/longjmp, all 7 arches" section for what was
+verified, the real arm64 bug found and fixed, and the (unrelated,
+setjmp-adjacent) libregexp.a mixed-arch-archive corruption also caught
+along the way. The design reasoning below is kept as-is since it's
+still the accurate account of WHY this tier looked the way it did
+going in.
+
+Different in KIND from every other tier here: not a syscall at all,
+pure userspace register save/restore, needed because
+lib_strings/libregexp/regcomp.c's own error-unwind path
+(regcomp1()/rcerror()) calls setjmp()/longjmp() directly -- meaning
+ANY consumer of libregexp that reaches a regex COMPILE ERROR needs
+this linked in, not just the one caller (utilities/byte's own TARG,
+found via `undefined: longjmp in rcerror` / `undefined: setjmp in
+regcomp1`) that happened to surface it first. include/core/exn.h
+already declares both, with its own header comment already flagging
+the gap: `typedef int jmp_buf; //TODO: jmp_buf defined in per-arch
+<u.h>` -- a single int is nowhere near wide enough to hold a real
+register-save state on any arch here.
+
+principia has per-arch reference implementations (lib_core/libc/386/
+setjmp.s, arm/setjmp.s) but only for those two arches -- this project
+targets 7 (386/amd64/arm/arm64/mips/riscv/riscv64), so at least 5 need
+writing from scratch (from each arch's own calling-convention rules,
+not copied), each needing: (1) a properly-sized jmp_buf struct in that
+arch's own include/arch/$cputype/u.h (callee-saved integer registers
+at minimum; floating-point callee-saved regs too if this compiler ever
+generates code that assumes they survive a longjmp, worth checking
+against each Xc's own ABI notes before assuming int-only suffices),
+and (2) the actual save/restore asm pair.
+
+Tier 4 (fork/exec/wait/pipe) itself
+------------------------------------------------------------------------
+
+This is what pcc (the compiler driver) and mk need to spawn
+subprocesses, i.e. the point where the toolchain can drive itself.
+Reference implementations again already exist in BOOT/lib9/:
+exec.c, execl.c, fork.c, rfork.c, await.c.
+
+               386/arm       amd64   arm64/riscv*  mips(o32)  Darwin      Plan9
+  fork         fork     2    57      clone   220   4002       fork    2   RFORK = 1
+  exec         execve  11    59      execve  221   4011       execve 59   EXEC  = 2
+  wait         wait4  114    61      wait4   260   4114       wait4   7   AWAIT = 4
+  pipe         pipe    42    22      pipe2    59   4042       pipe   42   PIPE  = 27
+  getpid       getpid  20    39      getpid  172   4020       getpid 20   (/dev/pid)
+  kill         kill    37    62      kill    129   4037       kill   37   (/proc/n/note)
+
+Gotchas:
+- arm64/riscv have no fork and no pipe. clone(SIGCHLD,0,0,0,0) and
+  pipe2(fds,0) are the substitutes.
+- mips's pipe (4042) is sysm_pipe, a MIPS-specific quirk: it returns
+  the two fds in v0/v1 rather than through a pointer, which the
+  generic _syscall6 trampoline cannot express. Use pipe2 (4328) on
+  mips instead -- number from the o32 table, verified.
+- riscv32 has no wait4 (260 is 64-only). Needs waitid, or the
+  time64 variants. Verify before writing.
+- Darwin fork cannot be called raw from libc without care (the child
+  pid comes back in a second return register, and Apple actively
+  discourages raw fork). Defer Darwin in this tier rather than
+  letting it block Linux+Plan9.
+
+Tier 5: time
+------------------------------------------------------------------------
+
+               386/arm            amd64   arm64/riscv64   mips(o32)  Darwin   Plan9
+  time/nsec    gettimeofday  78   96      169             4078       116      (/dev/bintime)
+  sleep        nanosleep    162   35      101             4166       --       SLEEP = 23
+
+riscv32 again: gettimeofday (169), clock_gettime (113) and nanosleep
+(101) are all 64-only. rv32 must use clock_gettime64 (403) and
+clock_nanosleep_time64 (407).
+
+LANDED, and with a different call than this table anticipated: time/nsec
+and sleep went to clock_gettime/clock_nanosleep everywhere (not
+gettimeofday/nanosleep) so that one arch-independent os/linux/time.c
+covers all seven -- see notes_libc_selfhost.txt's Tier 5 entries.
+
+alarm() joined this tier afterwards, and its numbers are:
+
+               386/arm   amd64   arm64/riscv/riscv64   mips(o32)   Darwin   Plan9
+  setitimer    104       38      103                   4104        83       (ALARM = 24)
+
+Note what is NOT in that row: SYS_alarm. The generic syscall ABI
+(arm64/riscv/riscv64) has no alarm(2) at all -- dropped with the rest of
+the legacy group, the same way fork() and pipe() were -- and where it
+does exist it takes whole SECONDS, so it cannot honour include/os/
+time.h's millisecond signature anyway. setitimer(ITIMER_REAL) is present
+on all seven, is millisecond-capable, and needs no per-arch struct
+layout if the itimerval fields are spelled intptr (sizeof(long) ==
+sizeof(void*) on every Linux ABI here). Darwin needs its own file only
+because its timeval is a mixed {long, int32} pair rather than two kernel
+longs. Plan9 needs no glue at all: ALARM was already in
+syscall/os/plan9/sys.h, unused, and takes milliseconds natively.
+Windows gets a documented always--1 -- it has timers but no note
+mechanism to deliver an expiry to. See notes_libc_api_design.txt's
+"alarm(): where the 'extend the API' argument does NOT apply" for why no
+general setitimer()-shaped API went in alongside it.
+
+Plan9 needs far fewer new syscalls than these tables suggest
+------------------------------------------------------------------------
+
+Worth stating explicitly so nobody transcribes a Unix-shaped list into
+the Plan9 column: getwd, getenv, time, getpid and sysname are all
+*file* operations on Plan9 (/dev/bintime, /env/*, /dev/pid, and
+FD2PATH=9 for getwd). They need nothing beyond the open/read/close
+already implemented. The real Plan9 column collapses to roughly:
+
+  BRK 5, DUP 8, FD2PATH 9, CREATE 13, REMOVE 14, CHDIR 15,
+  STAT 16, FSTAT 17, then RFORK 1, EXEC 2, AWAIT 4, PIPE 27.
+
+Found along the way: riscv32 lseek is wrong today
+------------------------------------------------------------------------
+
+NOT a plan item -- a latent bug in shipped code, found while checking
+riscv32 against scripts/syscall.tbl. Recorded here rather than in
+notes_arch_riscv.txt because it is found-but-unfixed; move it there
+(and drop this section) once it is actually fixed and tested.
+
+numbers_riscv.h is a verbatim copy of numbers_riscv64.h. That is
+correct for read/write/openat/close/exit, which are `common` in
+scripts/syscall.tbl. It is NOT correct for lseek:
+
+  62  32  llseek   sys_llseek
+  62  64  lseek    sys_lseek
+
+So on riscv32, number 62 is llseek, whose signature is
+llseek(fd, offset_high, offset_low, loff_t *result, whence) -- five
+args, returning 0 and writing the resulting offset *through a
+pointer*. But zsyscall_linux_riscv.c generates:
+
+  long lseek(int fd, vlong offset, int whence)
+  { return (long)_syscall6(SYS_lseek, (long)fd, (long)offset,
+                           (long)whence, 0, 0, 0); }
+
+which lands as llseek(fd, offset_lo32, whence, NULL, 0): the arguments
+do not line up at all, and result is NULL.
+
+Why the test suite does not catch it: tests/c/hello_libc/io.c is in
+the 7-arch qemu ARCHS loop and does call seek, but only ever
+seek(fd, 0, 0). That degenerates to llseek(fd, 0, 0, NULL, 0) --
+whence=0 (SEEK_SET), offset = (0<<32)|0 = 0 -- so the kernel performs
+the correct seek-to-zero, and only *then* fails copying the result to
+the NULL pointer, returning -EFAULT. io.c ignores seek's return value
+and checks only the re-read bytes, so the test passes. Any nonzero
+seek on riscv32 would go to the wrong offset.
+
+Evidence level: derived from the kernel table plus the generated C,
+not from an executed failing test. Confirm with a seek(fd, N, 0) for
+nonzero N under qemu-riscv32 before fixing.
+
+The same 32-vs-64 split hits ftruncate (46 is ftruncate64 on rv32)
+and fcntl (25 is fcntl64), if those are ever added.
+
+Recommendation: generate numbers_*.h before Tier 3
+------------------------------------------------------------------------
+
+numbers_amd64.h's own comment already anticipates this ("a
+kernel-header-scraping generator ... is a natural follow-up once more
+are needed"), and GO/pkg/syscall/mksysnum_linux.sh is the in-tree
+model. Seven Linux arches times ~25 more calls is ~175 hand-
+transcribed integers across five numbering conventions, with the
+32-bit *64 traps above lying in wait -- and the riscv32 lseek bug is
+proof that hand-copying one arch's file to another already produced a
+real bug at only six calls. Generating from the kernel's syscall_*.tbl
+files also gets the 32/64 column split right by construction, which
+is exactly the distinction hand-copying loses.
+
+Suggested ordering overall: Tier 1 (unblocks pool.c) -> Tier 2 (cheap,
+retires 70+ call sites) -> generator -> Tier 3 -> Tier 4 (self-host
+milestone) -> Tier 5.

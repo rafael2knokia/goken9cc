@@ -3,14 +3,19 @@
 PROGS=${TARG:%=$O.%}
 MANFILES=${TARG:%=%.man}
 
-BIN=$ROOT/$objtype/bin
+# keyed by objtype (not cputype) so a host-bootstrap build
+# (objtype=boot-gcc/boot-clang) and a self-hosted build for the same
+# target (objtype=arm64/amd64/...) never share a directory
+BIN=$ROOT/arch/$objtype/bin
 BINS=${TARG:%=$BIN/%}
 
 all:V: $PROGS
 
 
+# claude: $BOOTLIBS appended directly here -- see mkfiles/mkone's
+# identical comment and todo.org's own entry for why.
 $O.%:	%.$O $OFILES $LIB
-	$LD $LDFLAGS -o $target $prereq $LDLIBS
+	$LD $LDFLAGS -o $target $prereq $LDLIBS $BOOTLIBS
 
 %.$O:	$HFILES		# don't combine with following %.$O rules
 %.$O:	%.c

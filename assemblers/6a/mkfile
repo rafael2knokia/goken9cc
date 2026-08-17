@@ -1,0 +1,17 @@
+TOP=../..
+<$TOP/mkfiles/$objtype/mkfile
+
+TARG=6a
+LDLIBS=-lbio $BOOTLIBS
+OFILES=\
+	y.tab.$O\
+	lex.$O\
+
+HFILES=	$TOP/include/obj/6.out.h y.tab.h	a.h
+
+YFILES=a.y
+YFLAGS=-D1 -d
+
+<$TOP/mkfiles/mkone
+
+lex.$O:	$TOP/compilers/cck/macbody $TOP/compilers/cck/lexbody $TOP/compilers/cck/compat

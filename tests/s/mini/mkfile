@@ -1,109 +1,217 @@
-# add -v to some linker command to debug
+# Minimal hello world like programs in assembly for many architectures
+# and also many OSes!
+# Good to test the very basic features of a toolchain (assembler and linker).
+# You can add -v to some linker command to help debug.
 
-#TODO: hello_linux_riscv.exe (segfault right now)
 LINUXBINS=hello_linux_386.exe hello_linux_amd64.exe \
           hello_linux_arm.exe hello_linux_arm64.exe \
+          hello_linux_riscv.exe hello_linux_riscv64.exe \
           hello_linux_mips.exe \
-           hello_linux_386_.exe hello_linux_arm_.exe hello_linux_arm__.exe
-EXITLINUXBINS=exit_linux_arm.exe exit_linux_arm64.exe exit_linux_arm_.exe \
-              exit_linux_riscv.exe exit_linux_mips.exe
-
+          hello_linux_386_.exe hello_linux_arm_.exe hello_linux_amd64_.exe
+MACOSBINS=hello_macos_amd64.exe hello_macos_arm64.exe \
+          hello_macos_libc_amd64.exe
+WINDOWSBINS=hello_windows_386.exe hello_windows_amd64.exe
 PLAN9BINS=hello_plan9_386.exe hello_plan9_arm.exe hello_plan9_mips.exe
-#TODO: hello_xv6_386.exe hello_xv6_riscv.exe
+#TODO: hello_xv6_386.exe hello_xv6_riscv.exe and possibly hello_xv6_arm.exe
 XV6BINS=
+# claude: .wasm, not .exe -- unlike every other target here this isn't
+# a native-OS executable at all, and naming it .wasm is what makes a
+# reader (or a tool) recognize it as one immediately.
+WASMBINS=hello_wasm.wasm storeorder_wasm.wasm
 
-#TODO: hello_macos_arm64.exe
-MACOSBINS=hello_macos_amd64.exe
-#TODO: hello_windows_386.exe hello_windows_amd64.exe
-WINDOWSBINS=
-
-all:V: $LINUXBINS $EXITLINUXBINS $MACOSBINS $WINDOWSBINS $PLAN9BINS $XV6BINS
+all:V: $LINUXBINS $MACOSBINS $WINDOWSBINS $PLAN9BINS $XV6BINS $WASMBINS
 
 # This target is part of mk test CI regression check in Dockerfile and GHA
-# (it requires dpkg --add-architecture i386 for _386.exe to run
-#  or qemu-user and qemu-user-binfmt).
-# Most archs are supported by qemu-user-binfmt in docker GHA, and so
-# one can use simply ./$i below to run the test, but unfortunately for mips
-# we need some special code because qemu-mips32sn is used instead
-# of qemu-mips which is weird so we have to force the use of qemu-mips.
-# TODO: cmp with "Hello world" string
-# TODO: run $EXITLINUXBINS and expect exit code to be 42
+# (it requires just qemu-user; see ../../../scripts/qemu-runner for why we
+# no longer rely on qemu-user-binfmt / binfmt_misc, which used to need
+# forcing for mips since it picked qemu-mips32sn instead of qemu-mips).
+# Windows PE binaries are checked the same way, but under wine instead of
+# qemu-user: wine translates the Win32/kernel32.dll ABI in userspace, no
+# per-arch emulator binary needed (see the Dockerfile's `test` stage).
+# Unlike qemu-user, wine does not translate the CPU ISA, only the Win32
+# ABI, so it can only run these (x86/amd64) PE binaries natively on an
+# x86_64 host; skip on arm64 hosts, same spirit as the arm64/Darwin
+# codesign guard down in the hello_macos_arm64.exe recipe below.
+# (the exit(42) programs moved to tests/s/exit, which asserts their code)
+# Every hello prints exactly "Hello, world\n"; cmp against hello.expected.txt
+# so a silently-wrong program (e.g. writing nothing, or a bad byte) fails the
+# test instead of passing on a bare "it ran" -- like tests/c/mini does.
 test:V: all
       for (i in $LINUXBINS) {
          echo $i
-	 if (~ $i hello_linux_mips.exe)
-	   qemu-mips ./$i
-	 if not
-	    ./$i
+         arch=`{echo $i | sed 's/^hello_linux_//; s/\.exe$//'}
+         ../../../scripts/qemu-runner $arch ./$i | cmp /dev/stdin hello.expected.txt
+      }
+      if(~ `{uname -m} x86_64) for (i in $WINDOWSBINS) {
+         echo $i
+         WINEDEBUG=-all wine ./$i | cmp /dev/stdin hello.expected.txt
+      }
+      if not
+         echo 'skipping Windows/wine tests: wine only runs x86 PE natively on an x86_64 host'
+      for (i in $WASMBINS) {
+         echo $i
+         ../../../scripts/wasm-runner ./$i | cmp /dev/stdin hello.expected.txt
+      }
+      # Plan9 executables don't run on the host OS (different ABI/exec
+      # format from Linux/macOS/Windows), so there's no qemu-user
+      # equivalent for them; run them under machines/5i and machines/vi
+      # instead (assumed already built+installed on $PATH, same as the
+      # wine/qemu-user assumption above). Both are interactive
+      # debuggers, not one-shot interpreters: ':c' continues execution
+      # from the entry point main() already set up, and '$q' exits once
+      # stopped. Line 2 of the output is the program's own "Hello,
+      # world\n" (line 1 is the "5i"/"vi" startup banner); see
+      # tests/5i/smoke.sh and tests/vi/smoke.sh for more thorough
+      # (but less strict) coverage of these two emulators.
+      for (i in $PLAN9BINS) {
+         echo $i
+         if(~ $i hello_plan9_arm.exe)
+            printf ':c\n$q\n' | 5i ./$i | sed -n 2p | cmp /dev/stdin hello.expected.txt
+         if not if(~ $i hello_plan9_mips.exe)
+            printf ':c\n$q\n' | vi ./$i | sed -n 2p | cmp /dev/stdin hello.expected.txt
+         if not
+            echo 'skipping '$i': no plan9/386 emulator available (only 5i/vi exist)'
       }
 
+# macOS-native run tests (no qemu): unlike `test` above, which only
+# *builds* the Mach-O binaries (they can't run under qemu-user on CI),
+# these actually execute them and cmp the output, same strict check as
+# the Linux binaries. Split by host arch: a Mach-O binary only runs
+# natively on its own CPU. Driven from the top-level `mk test_macos`.
+test_macos_arm64:V: hello_macos_arm64.exe
+	./hello_macos_arm64.exe | cmp /dev/stdin hello.expected.txt
+
+test_macos_amd64:V: hello_macos_amd64.exe hello_macos_libc_amd64.exe
+	./hello_macos_amd64.exe | cmp /dev/stdin hello.expected.txt
+	./hello_macos_libc_amd64.exe | cmp /dev/stdin hello.expected.txt
+
+# Windows-native run tests (no wine): unlike `test` above, which runs
+# WINDOWSBINS under wine and only on an x86_64 host, this runs the PE
+# binaries directly since the host running this target IS Windows.
+# Driven from the top-level `mk test_windows`.
+test_windows:V: $WINDOWSBINS
+	for (i in $WINDOWSBINS) {
+		echo $i
+		./$i | cmp /dev/stdin hello.expected.txt
+	}
+
 clean:V:
-	rm -f *.[5678iv] *.exe
+	rm -f *.[5678ivj] *.e *.exe *.wasm
 
 #Linux
 # old: -X to avoid the golang specific stuff and -d to disable dynamic linking
 hello_linux_386.exe: hello_linux_386.s
    8a -c $prereq
    8l -H7 -o $target -E _start hello_linux_386.8
-hello_linux_386_.exe: hello_linux_386_.s
-   8a_ -c $prereq
-   8l_ -o $target -E _start hello_linux_386_.8
 hello_linux_amd64.exe: hello_linux_amd64.s
    6a -c $prereq
-   6l -o $target -E _start hello_linux_amd64.6
+   6l -H7 -o $target -E _start hello_linux_amd64.6
 hello_linux_arm.exe: hello_linux_arm.s
    5a -c $prereq
    5l -H7 -o $target -E _start hello_linux_arm.5
-hello_linux_arm_.exe: hello_linux_arm_.s
-   5a_ -c $prereq
-   5l_ -o $target -E _start hello_linux_arm_.5
-hello_linux_arm__.exe: hello_linux_arm__.s
-   5a__ -c $prereq
-   5l__ -H7 -o $target -E _start hello_linux_arm__.5
 hello_linux_arm64.exe: hello_linux_arm64.s
    7a -c $prereq
    7l -H7 -o $target -E _start hello_linux_arm64.7
 hello_linux_riscv.exe: hello_linux_riscv.s
    ia -c $prereq
    il -o $target -E _start hello_linux_riscv.i
+hello_linux_riscv64.exe: hello_linux_riscv64.s
+   ja -c $prereq
+   jl -o $target -E _start hello_linux_riscv64.j
 hello_linux_mips.exe: hello_linux_mips.s
    va -c $prereq
    vl -o $target -E _start hello_linux_mips.v
 			
 
+# go-era toolchain testing
+
+hello_linux_386_.exe: hello_linux_386_.s
+   8ag -c $prereq
+   8lg -H7 -o $target -E _start hello_linux_386_.8
+hello_linux_arm_.exe: hello_linux_arm_.s
+   5ag -c $prereq
+   5lg -H7 -o $target -E _start hello_linux_arm_.5
+hello_linux_amd64_.exe: hello_linux_amd64_.s
+   6ag -c $prereq
+   6lg -H7 -o $target -E _start hello_linux_amd64_.6
+
 # macOS
+# -H6 selects the apple MACH (Mach-O) header. 6l (linkers/lk/macho.c)
+# emits the modern format: LC_MAIN entry (not LC_UNIXTHREAD),
+# MH_DYLDLINK|MH_TWOLEVEL|MH_PIE, links /usr/lib/libSystem.B.dylib, and
+# carries LC_DYLD_INFO_ONLY and LC_BUILD_VERSION. (-s is redundant here
+# -- 6l always strips for -H6, no symbol-table path exists yet -- but
+# kept for clarity/parity with the other -H6 recipes below.)
 hello_macos_amd64.exe: hello_macos_amd64.s
    6a -c $prereq
-   6l -o $target -E _start hello_macos_amd64.6
+   6l -s -H6 -o $target -E _start hello_macos_amd64.6
+
+# the codesign step is mandatory on arm64 macOS: the kernel SIGKILLs
+# unsigned (or non-PIE, or static) arm64 executables at exec() time.
+# scripts/macos-codesign is a no-op when cross-building from Linux
+# (CI), where the binary can not run anyway. See
+# docs/claude_notes/notes_exec_macho.txt for the whole story.
+hello_macos_arm64.exe: hello_macos_arm64.s
+   7a -c $prereq
+   7l -H6 -o $target -E _start hello_macos_arm64.7
+   ../../../scripts/macos-codesign $target
+
+# Same as hello_macos_amd64 but calls libSystem's _write instead of a raw
+# syscall: -I declares the import, 6lg binds it (LC_DYLD_INFO) into the writep
+# GOT slot. This is the variant that actually runs under darling (which
+# emulates Darwin via libSystem and does not translate raw syscalls).
+# Still 6ag/6lg (Go-era): linkers/lk/macho.c has no -I/dynamic-import
+# support yet, unlike the kernel32.dll imports lk/pe.c already does for
+# -H10 -- a Mach-O counterpart would be the natural next step.
+hello_macos_libc_amd64.exe: hello_macos_libc_amd64.s
+   6ag -c $prereq
+   6lg -s -H6 -I writep:_write:/usr/lib/libSystem.B.dylib -o $target -E _start hello_macos_libc_amd64.6
 
 # Plan9
 # -H 2 this time and -E _main
 hello_plan9_386.exe: hello_plan9_386.s
-   8a_ -c $prereq
-   8l_ -o $target -H 2 -E _main hello_plan9_386.8
+   8a -c $prereq
+   8l -o $target -H 2 -E _main hello_plan9_386.8
 hello_plan9_arm.exe: hello_plan9_arm.s
-   5a_ -c $prereq
-   5l_ -o $target -H 2 -E _main hello_plan9_arm.5
+   5a -c $prereq
+   5l -o $target -H 2 -E _main hello_plan9_arm.5
 # actually no need -X; va/vc/vl are new and were not "go-ized"
 # actually -X would print the assembly on stdout in vl ...
 hello_plan9_mips.exe: hello_plan9_mips.s
    va -c $prereq
    vl -o $target -H 2 -E _main hello_plan9_mips.v
 
-exit_linux_arm64.exe: exit_linux_arm64.s
-   7a -c $prereq
-   7l -o $target -H7 -E _start exit_linux_arm64.7
-exit_linux_mips.exe: exit_linux_mips.s
-   va -c $prereq
-   vl -o $target -E _start exit_linux_mips.v
-exit_linux_riscv.exe: exit_linux_riscv.s
-   ia -c $prereq
-   il -o $target -E _start exit_linux_riscv.i
+# Windows (PE). Both link a kernel32.dll .idata (GetStdHandle, WriteFile,
+# ExitProcess) and expose the thunks as __imp_* symbols so the program can
+# print. See linkers/lk/pe.c. -s because there is no PE symbol table path
+# yet. Run under wine on Linux hosts; the `test` target above does this
+# for both automatically as part of `mk test`.
+#
+# 386 uses 8a/8l: linkers/8l now has -H 10 wired (same shared
+# linkers/lk/pe.c as 6l below), emitting the PE32 (32-bit) optional
+# header. amd64 uses 6l -H 10, which emits a PE32+ (64-bit) optional
+# header.
+hello_windows_386.exe: hello_windows_386.s
+   8a $prereq
+   8l -s -H 10 -o $target -E _start hello_windows_386.8
+hello_windows_amd64.exe: hello_windows_amd64.s
+   6a -c $prereq
+   6l -s -H 10 -o $target -E _start hello_windows_amd64.6
 
-%.exe: %.s
-   5a_ -c $prereq
-   5l_ -o $target -E _start $stem.5
+# wasm
+# stdout goes through a WASI host import (wasi_snapshot_preview1.
+# fd_write), not a raw syscall -- el's -I flag wires an otherwise-
+# undefined CALL target to that import, the same role -I plays for
+# 6lg's Mach-O dynamic imports above (hello_macos_libc_amd64.exe).
+# See hello_wasm.s's own comment and linkers/el/l.h's Import comment.
+hello_wasm.wasm: hello_wasm.s
+   ea $prereq
+   el -o $target -I 'fd_write=wasi_snapshot_preview1.fd_write' hello_wasm.e
 
-%_.exe: %.s
-   5a__ -c $prereq
-   5l__ -H7 -o $target -E _start $stem.5
+# regression test for a real STOREx-operand-order bug found while
+# building tests/c/mini2/hellowrite_wasm.c -- see storeorder_wasm.s's
+# own comment. Same expected output as every hello_*.exe here, just
+# built one byte at a time through a runtime STOREB instead of DATA.
+storeorder_wasm.wasm: storeorder_wasm.s
+   ea $prereq
+   el -o $target -I 'fd_write=wasi_snapshot_preview1.fd_write' storeorder_wasm.e

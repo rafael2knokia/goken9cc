@@ -1,38 +1,68 @@
 TOP=../../..
-<$TOP/mkconfig
 <$TOP/mkfiles/$objtype/mkfile
 
 all:V: helloprintf.exe
 clean:V:
 	rm -f *.[5678ijv] *.exe *.a
-test_one:V: all
-	./helloprintf.exe
+test_one:V:
+	mk 'objtype='$cputype all
+	./helloprintf.exe | cmp /dev/stdin helloprintf.expected.txt
 
 CPP_FLAGS=-D$objtype
 
 # can use -v for verbose mode to help debug
-#LATER: add rune.$O_ in libprint.a? and use functions from it?
+#LATER: add rune.$O in libprint.a? and use functions from it?
 helloprintf.exe: helloprintf.c
-   #$CC_ $CPP_FLAGS -c rune.c
-   $CC_ $CPP_FLAGS -c vlrt.c
-   $CC_ $CPP_FLAGS -c print.c
-   $CC_ $CPP_FLAGS -c float.c
-   $CC_ $CPP_FLAGS -c helloprintf.c
-   $AS_ $CPP_FLAGS -c linux_$objtype.s
-   $AR_ rc libprint.a linux_$objtype.$O_ print*.$O_ float*.$O_ vlrt.$O_
-   $LD_ -L. -o $target -E _main helloprintf.$O_
+   #$CC $CPP_FLAGS -c rune.c
+   $CC $CPP_FLAGS -c vlrt.c
+   $CC $CPP_FLAGS -c print.c
+   $CC $CPP_FLAGS -c float.c
+   $CC $CPP_FLAGS -c helloprintf.c
+   $AS $CPP_FLAGS -c linux_$objtype.s
+   $AR rc libprint.a linux_$objtype.$O print*.$O float*.$O vlrt.$O
+   $LD -L. -o $target -E _main helloprintf.$O
 
-#TODO: arm_ arm64 mips 386 riscv
-#TODO: arm__: weird float output, 2.00001 instead of 2.0000, and very bad
-#            output for 2.2
-ARCHS=amd64 arm arm__
+#TODO: arm_
+#TODO: arm: qemu-arm's legacy ARM FPA "FIX" (float64->int32, used by
+#           printfloat's digit-extraction loop) coprocessor-instruction
+#           emulation is buggy for non-"nice" inputs -- e.g. (int)0.9999999
+#           and (int)1.9999999 both come back INT_MIN under this qemu, while
+#           (int)0.5 is fine. 5c still targets the retired FPA coprocessor
+#           (MOVDW) rather than VFP, so this is a qemu emulation gap in this
+#           environment, not a codegen bug -- see 2.000001/garbage-for-2.2
+#           below. Left out of ARCHS until confirmed on real ARM FPA hardware
+#           or a qemu build with correct FPA emulation.
+#TODO: mips: qemu-mips's TCG double-precision (FR=0) FPU-arithmetic emulation
+#           doesn't commit ADD.D/SUB.D/MOV.D results to the register storage
+#           SWC1 reads back (confirmed: ADD.S single-precision works fine,
+#           ADD.D always reads back as the pre-existing destination value).
+#           vc's own codegen and the FREGZERO/HALF/ONE/TWO runtime-constant
+#           convention (see linux_mips.s) are correct; this is a qemu
+#           emulation gap, not a toolchain bug. Left out of ARCHS.
+ARCHS=386 amd64 arm64 riscv
 test:V:
         for (arch in $ARCHS) {
            echo $arch
            mk clean
            mk 'objtype='$arch
-	   if (~ $arch arm__)
-	      qemu-armhf ./helloprintf.exe
-           if not
-	      qemu-$arch ./helloprintf.exe
+           $TOP/scripts/qemu-runner $arch ./helloprintf.exe | cmp /dev/stdin helloprintf.expected.txt
         }
+
+
+# macOS arm64: Darwin syscall stubs, Mach-O (-H6), mandatory ad-hoc
+# signature (see docs/notes_macos.txt). Runs natively on Apple Silicon.
+helloprintf_macos_arm64.exe: helloprintf.c
+   7c -Darm64 -c vlrt.c
+   7c -Darm64 -c print.c
+   7c -Darm64 -c float.c
+   7c -Darm64 -c helloprintf.c
+   7a -Darm64 -c macos_arm64.s
+   iar rc libprint.a macos_arm64.7 print*.7 float*.7 vlrt.7
+   7l -H6 -L. -o $target -E _main helloprintf.7
+   if(~ `{uname} Darwin) codesign -s - -f $target
+   if not true
+
+# runs natively on Apple Silicon (no qemu needed)
+test_macos_arm64:V: helloprintf_macos_arm64.exe
+	./helloprintf_macos_arm64.exe | cmp /dev/stdin helloprintf.expected.txt
+

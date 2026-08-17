@@ -1,16 +1,28 @@
 # -*- sh -*-
 
-BIN=$ROOT/$objtype/bin
+# keyed by objtype (not cputype) so a host-bootstrap build
+# (objtype=boot-gcc/boot-clang) and a self-hosted build for the same
+# target (objtype=arm64/amd64/...) never share a directory
+BIN=$ROOT/arch/$objtype/bin
 
 all:V:	$O.out
+
+# claude: $BOOTLIBS appended directly here rather than via a leaf
+# mkfile's own LDLIBS=$BOOTLIBS -- the latter hits a real mk quirk
+# (VAR=$UNASSIGNED becomes one stray empty argument, not zero) once
+# BOOTLIBS is itself unassigned for a self-hosted objtype. See
+# todo.org's "self-hosting utilities/mk/rc" entry for the full story.
+
 $O.out:	$OFILES $LIB
-	$LD $LDFLAGS -o $target $prereq $LDLIBS
+	$LD $LDFLAGS -o $target $prereq $LDLIBS $BOOTLIBS
 
 %.$O:	$HFILES		# don't combine with following %.$O rules
+
+# note: -o must come *before* the source file -- see mkfiles/mksyslib
 %.$O:	%.c
-	$CC $CFLAGS $CFLAGS_EXTRA $stem.c -o $target
+	$CC $CFLAGS $CFLAGS_EXTRA -o $target $stem.c
 %.$O:	%.s
-	$AS $AFLAGS $stem.s -o $target
+	$AS $AFLAGS -o $target $stem.s
 
 # to generate also y.tab.h with the token definitions
 # alt: move that in YACC definition in mkfile.proto
@@ -37,7 +49,7 @@ clean:V:
 	rm -f *.[$OS] [$OS].out y.tab.? lex.yy.c y.debug y.output $TARG $CLEANFILES $OFILES *.$O $O.out
 nuke:V:
         mk clean
-	rm -f *.acid $BIN/$TARG
+	rm -f *.acid $BIN/$TARG $NUKEFILES
 
 safeinstall:V: $O.out
 	test -e $BIN/$TARG && mv $BIN/$TARG $BIN/_$TARG

@@ -1,9 +1,8 @@
 TOP=../..
-<$TOP/mkconfig
 <$TOP/mkfiles/$objtype/mkfile
 
-TARG=8l
-LDLIBS=-lbio -l9 -lm
+TARG=8lk
+LDLIBS=-lbio $BOOTLIBS
 
 OFILES=\
 	asm.$O\
@@ -18,7 +17,7 @@ OFILES=\
 
 #old: compat.$O or $TARGMODEL.$O
 
-HFILES= l.h 8.out.h  $TOP/include/ar.h
+HFILES= l.h 8.out.h  $TOP/include/obj/ar.h
 
 
 <$TOP/mkfiles/mkone

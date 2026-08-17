@@ -1,0 +1,23 @@
+<$TOP/mkfiles/mkfile.proto
+
+# the goken cross-toolchain itself: used by tests/ (mk objtype=riscv64) and,
+# once self-hosting is viable, as CC/AS/LD for the top-level build too.
+# The RISC-V (rv64) lineage. ja/jc/jl are the *same*
+# binaries as ia/ic/il (assemblers/ia/mkfile, compilers/ic/mkfile,
+# linkers/il/mkfile install them under both names); their main()s
+# auto-select thechar='j' (64-bit) from argv[0]'s basename (or, for
+# ia/il, a -j flag too), the original inferno 'i'/'j' dual-width riscv
+# convention -- there is no separate top-level arch letter for riscv64
+# the way arm64 got its own '7' distinct from arm's '5'. Object ext .j.
+O=j
+CC=jc
+LD=jl
+AS=ja
+AR=iar
+
+CFLAGS=$CFLAGS_COMMON -I$TOP/include/arch/riscv64
+
+# see mkfiles/386/mkfile's own ARCHEXTRAOFILES comment. No vlop.$O
+# entry needed here (64-bit-native, no software vlong emulation), but
+# setjmp.s is still needed on every arch, this one included.
+ARCHEXTRAOFILES=arch/riscv64/setjmp.$O

@@ -3,7 +3,9 @@
 #define	BIT(n)	((uvlong)1<<(n))
 
 static struct {
-	uint32	start;
+	//old: was uint32, but pool.start holds a text address which can
+	// be above 4GB on macOS (see the comment on INITTEXT in l.h)
+	vlong	start;
 	uint32	size;
 } pool;
 
@@ -21,7 +23,8 @@ span(void)
 	Sym *setext, *s;
 	Optab *o;
 	int m, bflag, i;
-	int32 c, otxt, v;
+	vlong c, otxt;
+	int32 v;
 
 	if(debug['v'])
 		Bprint(&bso, "%5.2f span\n", cputime());
@@ -174,7 +177,7 @@ flushpool(Prog *p, int skip)
 	if(blitrl) {
 		if(skip){
 			if(debug['v'] && skip == 1)
-				print("note: flush literal pool at %#llux: len=%lud ref=%lux\n", p->pc+4, pool.size, pool.start);
+				print("note: flush literal pool at %#llux: len=%lud ref=%llux\n", p->pc+4, pool.size, pool.start);
 			q = prg();
 			q->as = AB;
 			q->to.type = D_BRANCH;
@@ -207,7 +210,22 @@ addpool(Prog *p, Adr *a)
 	t = zprg;
 	t.as = AWORD;
 	sz = 4;
-	if(p->as == AMOV) {
+	/* claude: was `if(p->as == AMOV)` only -- a genuinely 64-bit
+	 * constant used as an operand to any OTHER instruction (CMP, ADD,
+	 * ...) that needs the literal pool (i.e. doesn't fit that
+	 * instruction's own immediate encoding) still got a 4-byte
+	 * (AWORD) pool entry, silently truncating it to its low 32 bits.
+	 * `CMP $4294967296,R9` (0x100000000, needs bit 32) is a real,
+	 * minimal repro: aclass() classifies the constant C_VCON, but the
+	 * pool entry it gets truncates to 0, so the comparison silently
+	 * runs against 0 instead -- see
+	 * tests/c/regressions/arm64_uvlong_shift32.c. Extend to DWORD
+	 * whenever the constant doesn't already fit as its own low 32
+	 * bits (matches 9front's 1d330c0bd, ported here rather than
+	 * verbatim since goken's addpool() predates that commit's other,
+	 * unrelated LACON/isaddcon changes).
+	 */
+	if(p->as == AMOV || (cmp(C_VCON, c) && (uvlong)(a->offset & 0xFFFFFFFFULL) != (uvlong)a->offset)) {
 		t.as = ADWORD;
 		sz = 8;
 	}
@@ -237,6 +255,20 @@ addpool(Prog *p, Adr *a)
 	case C_NSOREG:
 	case C_NPOREG:
 	case C_LOREG:
+	/* claude: C_LACON (AMOV $var-N(SP),R -- load the EFFECTIVE ADDRESS
+	 * of a local variable, case 34 in optab.c) was missing from this
+	 * list, found compiling mk.c: aclass() (this file, D_AUTO/D_PARAM
+	 * case) already resolves it to a plain integer via `instoffset`
+	 * before addpool() ever runs, exactly like every other auto/oreg
+	 * class above -- but falling through to `default: t.to = *a;`
+	 * instead kept the original symbolic $var-N(SP) operand, which then
+	 * has no matching optab row (ADWORD only has C_VCON/C_LEXT/C_ADDR,
+	 * "illegal combination DWORD NONE NONE LACON"). Confirmed against
+	 * 9front's own span.c, which has C_LACON in this exact list
+	 * (9front also adds an `offset too large` overflow diag() here that
+	 * goken's switch doesn't have for any case, not ported -- no repro
+	 * for it yet). */
+	case C_LACON:
 		t.to.type = D_CONST;
 		t.to.offset = instoffset;
 		sz = 4;
@@ -320,8 +352,42 @@ isaddcon(vlong v)
 static int
 isbitcon(uvlong v)
 {
-	/*  fancy bimm32 or bimm64? */
-	return findmask(v) != nil || (v>>32) == 0 && findmask(v | (v<<32)) != nil;
+	/* claude: was `findmask(v) != nil || (v>>32)==0 &&
+	 * findmask(v|(v<<32)) != nil` -- the second half accepts any value
+	 * that's only encodable as a 32-bit-replicated bitmask pattern
+	 * (e.g. 0xFF: not a valid *64-bit* logical-immediate on its own,
+	 * but 0xFF|(0xFF<<32) is a valid "repeat every 32 bits" pattern).
+	 * This function is called from aclass() below, which classifies a
+	 * constant *without knowing which instruction width will consume
+	 * it* -- so accepting the 32-bit-only fallback here means a
+	 * genuinely 64-bit op (e.g. `uvlong v; v ^= 0xff;`, AEOR not
+	 * AEORW) can get classified as "fits as an immediate" and routed
+	 * to asmout.c's case 53, which then encodes it as a real 64-bit
+	 * EOR using that 32-bit-replicated mask -- correctly zeroing the
+	 * low byte, but *also* corrupting the same low byte of the high
+	 * 32-bit half, since a 64-bit-destination logical-immediate
+	 * instruction genuinely replicates its (sub-64) element pattern
+	 * across the whole register; there is no ARM64 encoding for
+	 * "touch only the low 32 bits of a 64-bit destination" other than
+	 * actually using the W-suffixed 32-bit instruction. Confirmed via
+	 * a minimal repro (tests/c/regressions/
+	 * arm64_bitcon_32bit_fallback.c): `uvlong v = ...; v ^= 0xff;`
+	 * silently corrupted a byte in the *upper* 32 bits too. Stricter
+	 * now: only a value that's a genuine 64-bit-spanning pattern
+	 * counts, so anything that previously relied on the fallback (only
+	 * really valid for 32-bit-width ops) now falls through aclass()'s
+	 * classification chain to C_LCON instead, which loads it through
+	 * the literal pool -- always correct, regardless of width, at the
+	 * cost of an extra load for the narrow set of values this affects
+	 * (fits 32-bit-replicated but not natively 64-bit) on truly
+	 * 32-bit-width operations that could otherwise have used a direct
+	 * immediate. See asmout.c's case 53 for the matching encode-time
+	 * fix (that fallback is now gated on the instruction's own width,
+	 * not applied unconditionally) and notes_arch_arm64.txt's "still
+	 * open" list for the fuller isbitcon32()/isbitcon64()-class-split
+	 * this was originally scoped as before landing this narrower fix.
+	 */
+	return findmask(v) != nil;
 }
 
 static int
@@ -627,6 +693,13 @@ aclass(Adr *a)
 			case SCONST:
 			case SLEAF:
 				instoffset = s->value + a->offset;
+				//NEW: on macOS the executable is PIE and so
+				// gets relocated by ASLR; an absolute address
+				// must be computed pc-relatively at run-time
+				// (with ADRP/ADD, see asmout.c case 66)
+				if(HEADTYPE == 6 &&
+				   (t == STEXT || t == SLEAF || t == SSTRING))
+					return C_ADDR;
 				return C_LCON;
 			}
 			if(!dlm) {
@@ -635,6 +708,9 @@ aclass(Adr *a)
 					return C_AECON;
 			}
 			instoffset = s->value + a->offset + INITDAT;
+			//NEW: same PIE story as above for data addresses
+			if(HEADTYPE == 6)
+				return C_ADDR;
 			return C_LCON;
 
 		case D_AUTO:
@@ -1265,18 +1341,38 @@ buildop(void)
 		case AMSR:
 			break;
 
+		case ALDAR:
+			oprange[ALDARW] = t;
+			oprange[ALDARH] = t;
+			oprange[ALDARB] = t;
+			break;
 		case ALDXR:
 			oprange[ALDXRB] = t;
 			oprange[ALDXRH] = t;
 			oprange[ALDXRW] = t;
 			break;
+		case ALDAXR:
+			oprange[ALDAXRW] = t;
+			oprange[ALDAXRH] = t;
+			oprange[ALDAXRB] = t;
+			break;
 		case ALDXP:
 			oprange[ALDXPW] = t;
+			break;
+		case ASTLR:
+			oprange[ASTLRW] = t;
+			oprange[ASTLRH] = t;
+			oprange[ASTLRB] = t;
 			break;
 		case ASTXR:
 			oprange[ASTXRB] = t;
 			oprange[ASTXRH] = t;
 			oprange[ASTXRW] = t;
+			break;
+		case ASTLXR:
+			oprange[ASTLXRW] = t;
+			oprange[ASTLXRH] = t;
+			oprange[ASTLXRB] = t;
 			break;
 		case ASTXP:
 			oprange[ASTXPW] = t;

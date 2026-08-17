@@ -1,11 +1,10 @@
 TOP=../../..
-<$TOP/mkconfig
 <$TOP/mkfiles/$objtype/mkfile
 
 #TODO: atnotify 
 
 TARG=diff
-LDLIBS=-lbio -l9
+LDLIBS=-lbio $BOOTLIBS
 
 OFILES=\
 	diffdir.$O\

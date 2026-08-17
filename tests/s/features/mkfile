@@ -1,0 +1,43 @@
+# Minimal hand-written assembly programs that exercise a single
+# toolchain feature ported from elsewhere (as opposed to tests/s/regressions,
+# which exercises a bug fix). Each program documents its own origin
+# (source repo + commit) in a comment at the top; see also
+# ../../../plan9front.txt for the running credits list.
+#
+# Every program here is expected to exit() with a specific code that
+# only a correct implementation of the feature produces; a silently
+# wrong encoding, opcode, or scheduling would exit with something else
+# (or hang), not merely fail to build.
+
+FEATURES=mips_atomic_llsc.exe arm64_atomic_ldxr_stxr.exe
+
+all:V: $FEATURES
+
+test:V: all
+      fail=()
+      for (i in $FEATURES) {
+         echo $i
+         arch=`{echo $i | sed 's/^mips_.*/mips/; s/^arm64_.*/arm64/'}
+         st=`{ ../../../scripts/qemu-runner $arch ./$i; echo $status }
+         if (~ $st 11)
+            echo '  ok: '$i' exit 11'
+         if not
+            fail=($fail $i^'(got '^$st^')')
+      }
+      if (~ $#fail 0)
+         echo 'all feature tests passed'
+      if not {
+         echo 'FAILED: '$fail
+         exit failed
+      }
+
+clean:V:
+	rm -f *.[5678iv] *.exe
+
+mips_atomic_llsc.exe: mips_atomic_llsc.s
+   va -c $prereq
+   vl -o $target -E _start mips_atomic_llsc.v
+
+arm64_atomic_ldxr_stxr.exe: arm64_atomic_ldxr_stxr.s
+   7a -c $prereq
+   7l -o $target -E _start arm64_atomic_ldxr_stxr.7

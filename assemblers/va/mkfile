@@ -1,18 +1,14 @@
 TOP=../..
-<$TOP/mkconfig
 <$TOP/mkfiles/$objtype/mkfile
 
 TARG=va
-LDLIBS=-lbio -l9 -lm
+LDLIBS=-lbio $BOOTLIBS
 
 OFILES=\
 	y.tab.$O\
 	lex.$O\
 
-HFILES=\
-	$TOP/linkers/vl/v.out.h\
-	y.tab.h\
-	a.h\
+HFILES=	$TOP/include/obj/v.out.h y.tab.h a.h
 
 YFILES=a.y\
 
@@ -20,4 +16,4 @@ YFLAGS=-D1 -d
 
 <$TOP/mkfiles/mkone
 
-lex.$O:	$TOP/src/cmd/cc/macbody $TOP/src/cmd/cc/lexbody
+lex.$O:	$TOP/compilers/cck/macbody $TOP/compilers/cck/lexbody $TOP/compilers/cck/compat

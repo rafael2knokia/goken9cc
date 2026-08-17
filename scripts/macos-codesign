@@ -1,0 +1,46 @@
+#!/bin/sh
+# Ad-hoc code-sign a Mach-O executable, when that is possible and needed.
+#
+# This exists so tests/*/mkfile do not each reimplement the "am I on
+# real macOS, and if so, codesign it" conditional (see git history of
+# tests/s/mini/mkfile's hello_macos_arm64.exe recipe, and
+# tests/c/hello_libc/mkfile's test_macos_arm64 target, for the
+# `if(~ `{uname} Darwin) codesign -s - -f $target; if not true` shape
+# this replaces) -- same spirit as scripts/qemu-runner centralizing
+# the "which qemu-xxx binary" mapping instead of leaving it in every
+# mkfile that needs it.
+#
+# Signing is mandatory, not optional, on real arm64 macOS: the kernel
+# SIGKILLs unsigned (and non-PIE, and static) executables at exec()
+# time, with no diagnostic -- see docs/claude_notes/notes_exec_macho.txt.
+# An ad-hoc signature (-s -, no certificate/identity) is enough for
+# local execution. But a -H6 Mach-O built while cross-compiling from
+# Linux (CI, Docker) can never run on that host anyway, and `codesign`
+# itself only exists on macOS -- so this is a no-op everywhere except
+# real Darwin, rather than a hard error, letting `mk test` build every
+# target's binary uniformly and leave actually *running* the Mach-O
+# ones to the host-gated test_macos target (see the top-level mkfile).
+#
+# Also skips (rather than errors on) a file that isn't Mach-O at all --
+# codesign(1) rejects those outright. This matters for any recipe (e.g.
+# benchs/compcert/mkfile's shared %.goken rule, used by every cputype
+# through the same code path) that can't tell ahead of time whether a
+# given build actually produced a Mach-O binary: on a Darwin host, 7l/
+# 6l default to -H6 (Mach-O) when targeting arm64/amd64, but 5l/vl/il/
+# jl (arm/mips/riscv/riscv64) have no Mach-O support at all and emit
+# something else regardless of host -- calling this unconditionally on
+# all of those must stay a no-op, not a build failure.
+#
+# Usage: macos-codesign <file.exe> [more-files.exe ...]
+
+set -e
+
+if [ "$(uname)" != "Darwin" ]; then
+	exit 0
+fi
+
+for f; do
+	case "$(file -b "$f")" in
+	Mach-O*) codesign -s - -f "$f" ;;
+	esac
+done

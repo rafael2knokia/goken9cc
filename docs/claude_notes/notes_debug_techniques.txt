@@ -1,0 +1,1148 @@
+Debugging techniques for goken miscompilation bugs
+=====================================================
+
+claude: General-purpose debugging *methodology* for tracking down
+goken compiler/assembler/linker bugs -- as opposed to
+notes_test_infra.txt (how the test suite itself is organized and run)
+or notes_shared_frontend_bugs.txt (a status table of specific bugs).
+This is "how I found bug X", written so the next session doesn't have
+to rediscover these from scratch. Grown out of the arm64 uvlong
+constant-truncation and sha3.c lexer-truncation investigations (see
+notes_arch_arm64.txt and git history); update this file when a new
+technique earns its place, not with narrative of any specific bug hunt.
+
+Differential tracing against a reference compiler (the single most useful technique)
+------------------------------------------------------------------------------------------
+
+When a program builds and links cleanly but computes the wrong answer
+(the hardest class of bug -- no diagnostic points at anything), the
+fastest way to localize it is NOT to stare at codegen. Instead:
+
+1. Take the exact same source file goken is miscompiling.
+2. Add plain `printf()` trace statements at natural checkpoints (loop
+   iterations, after each major computation step) -- printing enough
+   intermediate state to reconstruct where things went right vs wrong.
+   Many benchmark files already have a `#ifdef DEBUG` block ready-made
+   for this (see benchs/compcert/siphash24.c) -- check before adding
+   your own.
+3. Compile the *instrumented* copy with a real, trusted compiler
+   (clang or gcc, whichever is on the host) AND with goken's own
+   toolchain, using the exact same source.
+4. Run both, diff the trace output line by line. The first line that
+   differs tells you exactly which step/iteration/variable is wrong --
+   turning "the whole program is wrong" into "this one expression, in
+   this one iteration, computes 0x...wrong instead of 0x...right".
+
+This is dramatically faster than reading -S assembly cold, because you
+don't need to already suspect what's broken -- the diff finds it for
+you. Once you have a suspect line, THEN read the assembly for just
+that line/expression.
+
+Concretely (see git history around the sha3.c/siphash24.c
+investigation for the full worked example): a Keccak permutation
+function was instrumented to print the full 25-word state after every
+round; clang's and goken's traces matched for rounds 0-1 and diverged
+at round 2 in exactly one word, by exactly one bit -- immediately
+pointing at that round's specific round-constant (a value with bit 63
+set) rather than requiring any theory about *why* first.
+
+Progressive source minimization once you have a live repro
+------------------------------------------------------------------
+
+Once differential tracing (or any other method) gives you a *reliably
+reproducing* buggy program (even a whole real-world file), shrink it
+mechanically rather than guessing:
+
+1. Delete unrelated code paths a chunk at a time (unused functions,
+   unused struct fields, whole macro-expanded steps) and rebuild+rerun
+   after each deletion.
+2. Keep deleting as long as the bug still reproduces; back out the last
+   deletion the moment it stops.
+3. Prefer deleting *whole semantic units* (a macro invocation, a case
+   arm, a function) over line-by-line edits -- faster convergence, and
+   each intermediate state is still meaningful C.
+
+This reliably turns a multi-hundred-line real program into a
+20-50-line minimal repro suitable for tests/c/regressions/, without
+needing to understand the bug's mechanism first. It's how a full
+Keccak permutation (~100 lines including three macro-heavy transform
+steps) reduced to a ~15-line loop doing nothing but
+`st0 ^= const_array[round]` for the sha3.c literal-truncation bug --
+Theta, RhoPi, and Chi were all provably irrelevant once each was
+deleted in turn and the bug persisted.
+
+When deleting-away stalls, try reconstructing-forward instead: if a
+"minimized" repro (built the normal way, by copying the real function
+bodies verbatim and stripping everything else) mysteriously stops
+reproducing the bug, don't assume you deleted the wrong thing -- it's
+possible the *thing you stripped away* is the actual trigger, even if
+it looks like unrelated, never-executed code. Add pieces of the
+original file back one at a time (a whole loop, a whole later
+statement) rather than continuing to guess what a truly-minimal repro
+should contain. This is how benchs/compcert/binarytrees.c's bug was
+actually found: a hand-written minimal repro (BottomUpTree/ItemCheck/
+DeleteTree, copied verbatim, called from a small main()) did not
+reproduce the crash at all, even at the real program's exact tree
+depth -- only restoring the *entire* original main() body, including a
+`pow()` call inside a loop that never executes before the crash point,
+brought the bug back. The trigger turned out to be the mere presence
+of that pow() call in the compiled function, not anything reachable at
+runtime -- something no amount of deleting-away from the full program
+would have surfaced as cleanly, since removing pow() looks like "just
+removing dead code relative to the crash" until you test it.
+
+7c/7l-specific debug flags for bisecting *which pass* is at fault
+-------------------------------------------------------------------------
+
+Once you know a program's output is wrong (not just "it looks
+different in assembly"), these flags narrow down which compiler PASS
+introduced the corruption, before you read any code:
+
+- `7c -N file.c -S`: disables regopt() entirely (no register
+  allocation/optimization pass at all). If the bug disappears, it's
+  somewhere in regopt()/reg.c or peep.c, not in the initial
+  expression-to-Prog codegen (cgen.c/txt.c).
+- `7c -R file.c -S`: runs regopt() but skips peep() specifically (see
+  compilers/7c/reg.c's `if(!debug['R'] || debug['P']) peep();`). If `-R`
+  still shows the bug but `-N` doesn't, the bug is in regopt() itself
+  (register allocation/coloring/spill-reload synthesis), not the
+  peephole optimizer -- a real example: the mkvar() constant-width bug
+  in notes_arch_arm64.txt was isolated exactly this way.
+- `7c -g file.c -c`: prints every Prog as it's generated (gins()'s own
+  `if(debug['g']) print("%P\n", p);`), i.e. the RAW codegen before any
+  optimization pass touches it. Compare this against the same `-g`
+  trace from a different backend (e.g. 6c) building the identical
+  source, to see whether both backends reach the same intermediate
+  representation or diverge immediately -- if they diverge at the
+  `-g` level already, the bug is in codegen (cgen.c/txt.c), not
+  optimization; if `-g` traces match but final output doesn't, the bug
+  is downstream (reg.c/peep.c or the linker).
+- Read the compiler's warnings. Don't skip this when a program
+  "compiles clean but computes wrong" -- it can point straight at the
+  bug. The sha3.c literal-truncation bug (see notes_shared_frontend_
+  bugs.txt's "unsuffixed hex constant" entry) produced a "truncated
+  constant" warning on the exact lines at fault, but at the time this
+  was found it was invisible unless `-w` was passed -- warnings are
+  visible by default now (as of the same session; `-q` silences them
+  instead), specifically *because* this bug was found this way and
+  demonstrated how much a default-off warning can hide. If you're
+  reading this on an older checkout where warnings still default off,
+  pass `-w` explicitly rather than trusting a "clean" build.
+- `7l -a`: prints the linker's disassembly listing (address, raw
+  encoded bytes, and the Plan 9 assembly mnemonic) for everything it
+  processed, interleaved with any diagnostics -- read the raw
+  bytes column, not just the mnemonic: an instruction that failed to
+  encode (oplook() found no matching optab entry) shows as all-zero
+  bytes with a normal-looking mnemonic printed alongside, which is easy
+  to misread as "this instruction looks fine" if you don't check the
+  hex.
+
+Instrumenting a recursive function with a counter + guard + exit(), when lldb won't cooperate
+----------------------------------------------------------------------------------------------------
+
+When a deep recursive traversal (hundreds of thousands of calls) hits
+undefined behavior somewhere inside itself, and lldb's breakpoints
+aren't reliably stopping execution on this project's own binaries (see
+this file's own "macOS/Darwin-specific execution debugging" section,
+and the underlying issue is broader than just quarantine -- address-
+based breakpoints have been observed to silently not fire at all, even
+for addresses causally before a later crash), don't fight the
+debugger: add the check *in the C source itself* and call exit() with
+a distinct, greppable code the moment it fires. Concretely, for "a
+recursive function sometimes gets called with a bad argument
+somewhere in a quarter-million-call traversal": add a global counter,
+increment it once per successful call, and guard the function's own
+first dereference with something like
+`if((unsigned long)ptr < 0x1000){ printf("BAD: ptr=%p at call #%d\n",
+ptr, counter); exit(77); }`. This turns "a nondescript SIGSEGV
+somewhere deep in a huge recursion, with lldb's own backtrace showing
+only one broken frame" (this project's minimal -H6 Mach-O output does
+not appear to carry whatever unwind info lldb needs for `bt` to walk
+more than one frame -- observed repeatedly, not yet root-caused
+separately) into an exact, reproducible, greppable data point: which
+call number failed, and what bad value it saw. This is what actually
+cracked benchs/compcert/binarytrees.c's bug (see todo.org's "7c
+(compiler)" section) after lldb's own breakpoints/watchpoints
+repeatedly failed to stop where expected -- the counter+guard
+approach revealed the failure was happening at *exactly* the total
+node count of a perfect binary tree (2^(depth+1)-1), every single
+time, regardless of the tree's actual memory address -- a level of
+precision no amount of "set a breakpoint and see what happens" got to
+in the same amount of time, because it doesn't depend on the debugger
+actually stopping where asked.
+
+Renaming a suspect identifier to correlate corruption with its name
+----------------------------------------------------------------------------
+
+When garbled output *looks* like it could be a stray identifier leaking
+into the wrong place (e.g. a string that should read "%c" instead reads
+something else entirely), and you have a specific suspect name in mind,
+rename that one identifier in a minimal repro and rebuild. If the
+garbled output changes to track the new name, that confirms the bug is
+substituting the identifier itself (a symbol-table/macro-expansion
+bug), not corrupting memory at some fixed offset unrelated to the name.
+This is how benchs/compcert/mandelbrot.c's `print("%c", (c))` bug was
+distinguished from a generic buffer-overrun theory early: renaming the
+macro parameter from `c` to some other letter changed *what* the
+corrupted string contained, immediately pointing at macro-parameter
+substitution rather than, say, a fixed-size scratch buffer being
+overwritten by unrelated data. See notes_shared_frontend_bugs.txt's
+"Macro parameter substituted inside a string/char literal" entry for
+the bug this caught.
+
+Reading `-S` assembly output to verify a fix without executing anything
+----------------------------------------------------------------------------
+
+Not every environment has qemu-user available to actually *run* a
+cross-arch regression test's binary (this project's own dev host
+often doesn't -- see notes_test_infra.txt). When the bug under test
+manifests as wrong compile-time output (a corrupted string literal, a
+wrong constant, a missing instruction) rather than needing runtime
+execution to observe, `Xc -S file.c` and grepping the resulting
+assembly for the specific `DATA`/instruction in question is a fast,
+completely execution-free way to confirm a fix landed -- e.g. `7c -S
+cpp_macro_param_in_string.c | grep 'DATA.*string'` showing
+`$"%c\z..."` (fixed) vs `$"%42\z..."` (bug) directly, no linking or
+qemu-runner needed at all. Combine with git stash on just the fixed
+source file (see notes_test_infra.txt's stash-based verification
+pattern) to see both the before and after in the same repro without
+ever running the binary.
+
+Using snprint() instead of intercepting write() to test format-string bugs
+----------------------------------------------------------------------------
+
+To test a bug in the fmt/ library's formatting logic itself (dofmt(),
+__charfmt(), etc.) without needing to capture what actually got written
+to a real file descriptor, use snprint()/vsnprint() -- they format into
+a caller-provided memory buffer through the *exact same* dofmt() code
+path print()/fprint() use, just without the syscall at the end. Much
+simpler than trying to intercept the write() syscall (a locally-defined
+function of the same name will NOT override a call to the real,
+already-linked write() in this codebase's simple static-linking model
+-- there's no symbol interposition support to lean on). See tests/c/
+regressions/fmt_charfmt_high_bit.c for a worked example: it detects the
+%c-drops-high-bit-bytes bug purely by checking snprint()'s return value
+and buffer contents, no file descriptor or qemu-runner involved.
+
+Verifying a fix actually reached the *installed* binary, not just the source
+------------------------------------------------------------------------------------
+
+A fix compiling cleanly in isolation (e.g. via a quick `-S` check, per
+the technique above) is not proof the *installed* compiler/linker
+binary a regression test will actually invoke has picked it up. Two
+distinct footguns found together while wiring up
+cpp_macro_param_in_string.check (see notes_shared_frontend_bugs.txt's
+entry on the underlying bug for the fuller story):
+
+- A dependency line in the relevant mkfile may be commented out (e.g.
+  `#mac.$O: macbody` in compilers/cck/mkfile and compilers/cc/mkfile),
+  so a plain `mk install` after editing a #include'd body file like
+  macbody silently rebuilds nothing. `mk -a install` (force) is
+  required whenever you can't trust the dependency graph is complete.
+- Some per-arch compiler directories don't compile their own frontend
+  source at all -- they link a *prebuilt* library archive built by a
+  sibling directory (compilers/6c/ links compilers/cck/cc.a rather than
+  compiling mac.c itself). `mk -a install` inside the leaf directory
+  only relinks against whatever that archive already contains; if the
+  archive itself is stale, the leaf binary stays stale too, silently.
+  Rebuild the library's own directory first (compilers/cck/, in this
+  example), then the leaf.
+
+The reliable way to actually confirm a fix landed in the binary you're
+about to trust: don't just check that the build reported success --
+re-run the same `-S`/behavioral check *after* the full rebuild chain,
+on the freshly-installed binary. That's what caught this: 8c picked up
+the fix on the first `mk -a install` (its own directory rebuilds its
+library inline), but 6c silently didn't until compilers/cck/ was
+rebuilt explicitly first -- a difference invisible from either build's
+"success" output alone, only visible by re-checking the actual
+resulting assembly.
+
+A third variant, found wiring up benchs/compcert's goken-O0/goken-O3
+(docs/claude_notes/notes_frontend_optlevels.txt): running `mk
+objtype=boot-gcc` inside a compiler's own directory only produces a
+local o.out there -- it does NOT copy anything to $PATH's
+ROOT/arch/$objtype/bin/, which is what any script invoking the tool by
+bare name (`7c`, not `./o.out` or an explicit path) actually runs. `mk
+install` (not just `mk`) is required for that. This one is sneakier
+than the other two because it doesn't even fail quietly -- it produces
+a complete, plausible-looking result (bench.sh's full table, no error)
+that just happens to be wrong, since the stale pre-patch binary's
+ARGBEGIN loop silently absorbed the new `-O0`/`-O3` flag as two
+meaningless single-char debug flags instead of erroring on it. Same
+fix as always: re-verify the actual behavior (here, `7c -O0 -S` vs `7c
+-O3 -S` on a real .c file) using the exact invocation path (bare name
+via $PATH, not a directory-relative o.out) the thing you're trusting
+will actually use.
+
+Unbuffered write() markers vs print() when a crash might prevent a flush -- and when it doesn't matter
+------------------------------------------------------------------------------------------------------------
+
+When instrumenting a program that might SIGSEGV partway through, and
+using print()/printf() trace statements to bisect where, first check
+whether this libc's own print() path buffers across separate calls at
+all -- don't assume a stdio-style FILE* buffer that a crash could
+prevent from ever flushing. It doesn't, here: vfprint() (fmt/vfprint.c)
+allocates a *fresh, local* 256-byte Fmt buffer on every single
+print()/printf() call and explicitly calls __fmtFdFlush() before
+returning, so each call's output reaches the fd before the *next*
+statement even runs -- there is no cross-call buffering to lose on a
+later crash. First-hand confusion this session: an early debug pass
+assumed print() output could be silently lost and switched to raw
+write(1, "marker\n", n) calls instead "to be safe" -- genuinely
+harmless, but based on a wrong premise (verified afterward by reading
+vfprint.c directly), and the real reason that first pass showed zero
+output turned out to be an unrelated string-replace typo (whitespace
+mismatch silently leaving the intended edit unapplied). Worth knowing
+the flush behavior for real before reaching for write() out of
+caution: raw write() IS still preferable in one case though --
+formatting a *suspect* value through print()'s own machinery (the
+thing you're trying to test) to report on that same machinery is
+circular if the format call itself is a suspect. Manually converting a
+long to decimal digits and write()-ing the raw bytes (see below)
+sidesteps that.
+
+Manually formatting a value with write() to get a trusted read on it, independent of a suspect formatting call
+-------------------------------------------------------------------------------------------------------------------
+
+When the very thing under suspicion is a print()/printf() call itself
+(as opposed to the value being printed), inserting *another*
+print()-based trace statement to inspect that value doesn't actually
+rule anything out -- if print()'s handling of a particular vararg type
+or combination is what's broken, a second print() call might exercise
+the exact same broken path and give a misleading (or also-crashing)
+answer. Write a tiny throwaway helper that converts an integer to
+decimal digits by hand (repeated `%10`/`/10`, no library call) and
+write()s the raw bytes directly -- this is untestable-wrong in a much
+smaller amount of code than the real formatter, so a value it reports
+can be trusted while bisecting whether the *real* formatting call is
+the actual point of failure. Concretely, this is what separated
+"write_frequencies()'s hash-table size/total values are wrong" (would
+have pointed at the hash-table code) from "the values are exactly
+right (size=4, total=50000, matching the expected A/T/C/G split) and
+the crash is specifically in the subsequent printf(\"%.3f\", ...) call"
+(points at formatting/varargs instead) while investigating
+benchs/compcert/knucleotide.c's SIGSEGV -- both a %s+%.3f combined call
+and, further narrowed, a *bare* printf(\"%f\", floatexpr) with no other
+verbs at all, crash at that exact point in the real program, even
+though hand-verified via this technique to be receiving perfectly
+sane arguments.
+
+strace as a coarse but fast way to see how far a program actually got before a silent-looking crash
+-------------------------------------------------------------------------------------------------------
+
+Before reaching for gdb (which may not even load this project's own
+linker output at all -- see below) or adding print()-based
+instrumentation, run the failing binary under `strace -f` once. It
+costs nothing extra to try and immediately answers "did the crash
+happen in this syscall-heavy phase, or after it": for
+benchs/compcert/knucleotide.c's crash, a full strace showed thousands
+of successful one-byte read() calls (this project's own fgets() reads
+one byte at a time, no internal buffering -- see lib_core/libc/APE/
+stdio.c) ending in a clean `read() = 0` (real EOF) followed immediately
+by the SIGSEGV -- ruling out "crashed mid-file-read" in one command,
+before writing a single line of debug instrumentation, and correctly
+redirecting suspicion toward the *processing* that happens after the
+whole file is read rather than the file-reading path itself.
+
+qemu-user's -strace to split "wrong syscall" from "right syscall, mis-read result"
+-------------------------------------------------------------------------------------
+
+A sharper variant of the plain-strace technique above, for the
+cross-compiled targets: every arch this tree tests under qemu-user can
+be run as `qemu-<arch> -strace ./foo.exe` directly (scripts/qemu-runner
+picks the binary name; call qemu yourself when you want the flag).
+Unlike host strace, this works for all seven Linux arches from one x86
+box.
+
+What makes it worth reaching for early is that it draws a line the
+program's own output cannot: it shows what the *kernel* was asked and
+what the kernel answered, independently of what libc then did with
+that answer. When tests/c/hello_libc/dir.c failed on mips only, the
+trace showed:
+
+  unlink("dir_tmp.txt") = 0
+  open("dir_tmp.txt",O_RDONLY) = -1 errno=2 (No such file or directory)
+
+i.e. both syscalls behaved perfectly -- while the program printed
+"remove left the file behind", which it only does when that open()
+returns >= 0. That single contradiction localizes the bug to the
+syscall *return-value* path (svc_mips.s's trampoline, which was
+ignoring o32's $a3 error flag -- see notes_arch_mips.txt) with no
+instrumentation, no bisection, and no reading of generated assembly.
+
+Generalizing: whenever a libc-level call misbehaves on one arch only,
+check the trace before suspecting the syscall number, the arguments,
+or the compiler. "Kernel did the right thing, caller disagreed" and
+"kernel did the wrong thing" look identical from inside the program
+and completely different in one line of -strace output.
+
+A corollary worth designing tests around, since it is what let three
+successive bugs hide in this one file: a trampoline's *error* path is
+invisible to any test whose syscalls all succeed. hello.c and io.c
+only ever make calls that work. dir.c deliberately requires a call to
+FAIL (open() after remove()), which is what finally exposed it.
+
+A throwaway probe that prints one suspect value across several inputs
+-------------------------------------------------------------------------
+
+When a value is wrong but you cannot tell WHERE it went wrong, a
+ten-line program that prints just that value for a handful of chosen
+inputs often identifies the exact defect from the PATTERN of wrongness,
+with no debugger and no disassembly.
+
+Concretely, while chasing a Plan9 seek() that returned the wrong
+offset: rather than instrument libc, a scratch main() did
+
+  off = seek(fd, 6, 0);   print("seek(6,0) -> %lld\n", off);
+  off = seek(fd, 0, 0);   print("seek(0,0) -> %lld\n", off);
+  off = seek(fd, 3, 1);   print("seek(3,CUR) -> %lld\n", off);
+
+and printed 0, 0, and 4294967296. That last value is exactly 1<<32 --
+the whence argument (1) appearing in the HIGH word of the returned
+64-bit offset. A single number named the bug: something was reading the
+vlong one 4-byte stack slot too high, picking up
+(whence<<32)|offset_high. Confirmed in one grep of the emulator's
+sysseek() (+16 where the kernel uses +12).
+
+The technique generalizes: choose inputs that are DISTINCT SMALL
+POWERS or otherwise mutually distinguishable, never all-zero or
+all-equal. Zero is the worst possible probe value for an offset, index,
+or flag word, because it survives being truncated, mis-slotted, or
+dropped entirely -- which is precisely why the bug had hidden behind
+seek(fd, 0, 0) for so long. Picking 6 and 3/SEEK_CUR made the
+misplacement arithmetic legible at a glance.
+
+gdb refusing to load this project's own linker output at all
+-------------------------------------------------------------------
+
+`gdb --args ./some.goken` can fail immediately with "not in executable
+format: file format not recognized" -- even though `file` correctly
+identifies the same binary as a normal ELF executable for the target
+arch, and even with an absolute path (ruling out a cwd-relative-path
+theory). Not yet root-caused (plausibly some section BFD expects and
+this project's own Xl doesn't emit, given goken's linkers have
+repeatedly needed exactly-conformant-enough-for-the-kernel-loader
+output rather than fully standard output elsewhere in this tree's
+history) -- but the practical consequence is: don't spend time trying
+flags/paths to coax gdb into loading a goken-linked binary on this
+host. Fall back to strace (syscall-level visibility) and manual
+print()/write() instrumentation instead; both worked fine on the exact
+binaries gdb refused here.
+
+Bottom-up reconstruction with the *real* growth history/scale, not just the real code shape, when a "faithful-looking" minimal repro doesn't reproduce
+--------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+Extends this file's existing "reconstructing-forward" section
+(binarytrees.c's pow() story) with a sharper version of the same
+lesson, from the knucleotide.c investigation. A hand-written repro that
+faithfully reproduces the real code *shape* (same struct layout, same
+malloc/calloc/strdup calls, same sort-then-printf loop, even called
+from a separate function to match real stack depth) can still fail to
+reproduce a bug if it doesn't also reproduce the real *quantities* --
+how many bytes were allocated, how many times, in what order, before
+the crashing call. A structurally-faithful repro using 4 hand-built
+hash-table nodes and no file I/O did NOT crash; only re-introducing the
+real ~100KB input file (driving the real ~50000-byte buffer growth via
+realloc(), and the real, much-larger intermediate hash table churn from
+generate_frequencies() actually processing that much data) brought the
+crash back, even though the *values* reaching the final printf() were
+verified identical either way (via the manual-write() technique above).
+
+This scale theory turned out to be a red herring, caught by the next
+technique below: the real trigger had nothing to do with volume at all.
+Worth keeping this section anyway as a caution -- a same-shape-smaller-
+scale repro failing to reproduce a bug is genuinely ambiguous evidence
+("scale matters" and "some unrelated thing I stripped out in the
+process matters" look identical from here), so don't stop at the first
+theory that fits; keep testing until you've actually isolated the
+single changed variable, not just the first one that correlates.
+
+Narrowing down which of several candidate symbols an unexplained crash needs by testing each in isolation, then re-testing the same repro on a different backend
+--------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+What actually resolved the "scale" red herring above: the real, growth-
+matching repro (buffer sizes and final content identical to the real
+run, but built via simulated realloc() growth, no real file I/O) still
+did NOT crash on its own -- until a single, provably-dead call
+(`if(neverrun){ fopen("x","r"); }`, `neverrun` a global int initialized
+to 0, so the branch is never taken at runtime) was added anywhere in
+the same function. That immediately reproduced the crash. This is the
+same "mere presence, not execution" shape as binarytrees.c's pow() bug
+(see this file's "reconstructing-forward" section and todo.org) --
+recognizing the shape from a previously-documented bug is what turned
+"scale must matter" into "test presence-without-execution instead,
+exactly like last time".
+
+Once presence-without-execution was confirmed as the trigger, two
+further isolation steps are what actually made this a reportable
+finding rather than a vague "something about stdio.c":
+
+1. Test each candidate symbol individually, not just the group. The
+   real code linked in three new functions together (fopen/fgets/
+   fclose, lib_core/libc/APE/stdio.c). Rather than assume all three (or
+   "something about that file") are responsible, build one repro per
+   function, each with only that one dead call added to the same known-
+   safe baseline. All three reproduced independently here, which is
+   itself useful information (rules out "it's specifically fgets's own
+   internal loop", say) -- but the general point is: when N things
+   changed together, don't report "one of these N is the trigger",
+   spend the N extra small builds to say which one(s) actually are.
+2. Test whether a *different function's own callees* also trigger it.
+   fopen()/fgets()/fclose() each internally call a lower-level function
+   (open()/read()/close() respectively) that was already known-safe
+   elsewhere in the codebase (hello_libc, io.c). Testing those directly
+   -- same dead-code-presence pattern, calling open()/read()/close()/
+   seek() individually instead of the fopen/fgets/fclose wrappers --
+   did NOT reproduce the crash. This is what separated "any I/O-
+   adjacent symbol's presence triggers this" (would implicate something
+   shared, like the syscall trampoline machinery) from "specifically
+   these three wrapper functions do" (implicates something about their
+   own compiled bodies or their specific position in the link) --
+   a real, load-bearing distinction that a single all-three-together
+   test could never have surfaced.
+3. Re-run the *identical* repro (same .c file, unchanged) through a
+   different backend before concluding anything about the bug's scope.
+   The exact same dead-fopen()-call repro was built with both 7c/7l
+   (arm64) and 6c/6l (amd64); only the arm64 build crashed, amd64 ran
+   clean -- and the real, complete, unmodified knucleotide.c
+   subsequently confirmed the same split (crashes on arm64, matches
+   Results/knucleotide byte-for-byte on amd64). Without this step the
+   finding would have been mis-filed as "a bug in APE/stdio.c" (an
+   ordinary C source file, portable by construction) instead of what it
+   actually is: a second, independent instance of a 7c/7l-specific
+   link-time/layout bug -- the same family as binarytrees.c's pow()
+   bug, and worth cross-referencing there (todo.org) rather than
+   writing up as a new unrelated bug, once the shape matched.
+
+Correction to the above, and isolating a crash trigger to a *structural* fact about the build (object-file boundaries) rather than to specific symbols
+---------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+The three-part isolation above was real progress but its conclusion
+("specifically fopen/fgets/fclose, not their callees") was still
+wrong -- a good reminder that ruling out several specific theories
+doesn't mean the *next* theory you land on is correct, only that it's
+survived more tests than the others so far. Two results that didn't
+fit finally forced a rethink: (1) the crash reproduced identically at
+`-O0` (regopt() entirely disabled) through `-O3`, with byte-identical
+machine code at the crash-adjacent call site across all four --
+ruling out the optimizer despite register allocation *looking*
+different between crashing and non-crashing builds (that register
+shift, chased at length via reg.c's `regalloc()`/`lasti` round-robin
+counter, turned out to be a correlated symptom of unrelated code being
+compiled earlier in the same function, not the cause -- see git
+history for that dead end if picking this up again); (2) the crash
+reproduced with a plain `print("%d\n", i)` (an int, no float
+computation anywhere in the call), which the original "specifically
+fopen/fgets/fclose" framing had no room for.
+
+What actually found the real trigger: instead of continuing to vary
+*which function* was dead-called, vary the *build structure* while
+holding the dead-called function's own logic fixed. Concretely: take a
+function that calls a real external symbol (open() or strdup(), both
+already known individually safe when dead-called *from the same file
+as main*), and test all three placements of it: (a) inlined directly
+into main(), (b) a separate function within the same .c/.7 file as
+main(), (c) a separate function in its *own* .c file, compiled to its
+own .7, linked alongside main's .7. (a) and (b) never crashed, for
+either open() or strdup(). (c) crashed for *both* open() and strdup()
+-- immediately reframing the bug from "these specific symbols" to
+"calling any external function from a non-entry object file, even
+dead code, corrupts something elsewhere when >=2 object files are
+linked together" (confirmed further: a trivial no-external-call
+function placed the same way, option (c), does NOT crash -- the
+external call inside the separate object file is the load-bearing
+part, not merely "a second .o exists"). This is why fopen/fgets/fclose
+(lib_core/libc/APE/stdio.c, a separately-compiled object file whose
+functions each call another external symbol) tripped it while calling
+open()/read()/close() *directly from main's own file* never did --
+they're not different in what they call, they're different in *how
+many object-file boundaries* separate the call site from main().
+
+The general lesson: when a crash's trigger looks like it depends on
+*which* function/symbol is involved, and the individual-symbol tests
+keep producing a confusing pattern (some wrappers trigger it, their
+own callees don't, an unrelated function called the "same way"
+doesn't), consider that the real independent variable might not be
+symbol identity at all -- it might be a structural property of the
+build (object-file count, which file a call originates from, link
+order) that happens to correlate with which symbols you tried. Test
+that directly by holding the *content* of a dead call fixed and only
+varying *where it's compiled* (same file vs. separate file vs. inlined)
+before spending more effort on a growing, still-unexplained list of
+"this symbol does, this symbol doesn't."
+
+macOS/Darwin-specific execution debugging
+--------------------------------------------
+
+See notes_exec_macho.txt's own "Producing macOS arm64 executables"
+section for the primary techniques already documented there (codesign
+--verify, log stream for syspolicyd/AMFI verdicts, and an lldb batch-
+script pattern for tracing every call to a specific function via an
+auto-continuing breakpoint) -- not duplicated here. One addition from
+this pass: `file <binary>` (not just `ls`) is the fast way to tell
+"does this Mach-O actually exist and parse as one" apart from "the
+shell just hasn't caught up yet" -- a plain `ls -la` can show a
+file that a syscall-level race (quarantine removal, or simply writing
+to the wrong cwd -- see the note below) has already made disappear by
+the time the *next* command runs; `file` forces an actual open().
+
+Cross-arch rt0.s bring-up: verifying a calling convention when there is no disassembler
+------------------------------------------------------------------------------------------
+
+claude: grown out of wiring real argc/argv into every arch's
+lib_core/libc/arch/$cputype/rt0.s (previously all 7 arches just did
+`CALL main` / `BL main` with no argument setup at all -- every existing
+test used `void main(void)` specifically to dodge this, and todo.org
+already had a related, unexplained crash-on-argv[1] report). Two
+techniques worth keeping, and one specific gotcha they both exist to
+catch.
+
+First-order technique: empirically confirm each compiler's own
+argument-passing convention with a throwaway 2-arg probe compiled with
+-S, rather than assume it matches another arch or a textbook ABI doc:
+
+    echo 'void probe(int a, char **b) { *b = (char*)a; }' > probe.c
+    7c -S probe.c   # or 6c/8c/5c/vc/ic/jc for the other arches
+
+Reading the output tells you, per arch, whether the FIRST argument
+arrives in a register (arm/arm64/mips/riscv/riscv64 all do -- R0, R0,
+R1, R8, R8 respectively) or is caller-stack-passed like every other
+argument (amd64/386, no registers at all), and at what FP-relative
+offset the second argument lives (a full pointer-width slot per
+argument on every arch here, confirmed via the *first* register-passed
+argument still "reserving" its own phantom FP+0 slot in the numbering).
+
+Second-order gotcha this alone does NOT catch: -S output shows the
+compiler's own *logical* FP-relative addressing, resolved assuming
+whatever prologue the compiler+assembler decide to emit -- it does NOT
+tell you what raw, hand-written code operating on the bare hardware SP
+register (as rt0.s must, since there is no frame yet at the process
+entry point) needs to add or subtract to land on the same memory. Two
+compounding effects, found only by live inspection (see below), not by
+reasoning about the ABI on paper:
+
+  - Calling BL/JAL/CALL from within a TEXT block makes it "non-leaf",
+    and the assembler auto-inserts a prologue that saves the return
+    address BEFORE any of your own hand-written instructions run --
+    even with an explicit `TEXT foo(SB), $0` (zero declared frame
+    size!). This silently shifts the raw SP by a fixed, arch-specific
+    amount that raw register-relative code must compensate for: one
+    word on arm/mips/riscv/riscv64 (4 bytes on the 32-bit ones, still
+    only 8 -- not 16 -- on riscv64 despite its wider registers), a
+    full 16-byte-aligned block on arm64 (its ABI's mandatory stack
+    alignment), and none at all on amd64/386 (CALL's own push IS the
+    only stack effect, and there is no separate LR/RA register to
+    save).
+  - Separately, and NOT fully explained by the auto-push alone: the
+    exact stack slot where an *outgoing* argument must be written for
+    the callee to read it back correctly was consistently one pointer-
+    width slot further out than the naive "argv is the callee's FP+N,
+    so write it at (my adjusted SP)+N" arithmetic predicts, on every
+    arch tested (arm, arm64, mips, riscv, riscv64). Confirmed
+    empirically each time, never fully re-derived from first
+    principles -- treat any first attempt at these offsets as a
+    hypothesis to verify live, not a formula to trust.
+
+claude: the same "register delivery from the OS does not imply the
+*compiler's* multi-argument convention is register-based too" trap
+resurfaced later, in darwin/arm64's own rt0_darwin.s (2026-08). dyld's
+LC_MAIN hands argc/argv to _main in R0/R1, and R0 (argc) happens to
+already match 7c's own register-passed first argument -- which reads
+as "no bridging needed at all" if you stop there. But 7c still expects
+argv (main's *second* parameter) on the stack, same as every other
+arch above; dyld putting it in R1 doesn't change that. The original
+file stored R1 into a global for getenv()'s benefit and called main()
+with nothing written to the outgoing-argument slot, leaving it to read
+whatever garbage the auto-inserted non-leaf prologue (see above) left
+behind -- usually harmless-looking, occasionally a small integer
+dereferenced as a pointer (`ldr x1,[x1]` with x1=0x8, EXC_BAD_ACCESS).
+Fix mirrored linux/arm64's own rt0.s next to it verbatim (`SUB
+$32,RSP,RSP; MOV R1,16(RSP)` before `BL main`) rather than re-deriving
+the offset. Lesson: when a NEW GOOS's rt0 bridge looks like it needs
+*less* work than an existing one because the OS's calling convention
+happens to overlap with the compiler's first-argument register, check
+every OTHER argument the compiler expects independently -- the
+overlap on argument #1 is a coincidence specific to that one slot, not
+evidence the rest of the bridge is unnecessary.
+
+A sibling technique for the same "no disassembler, verify the ABI fact
+live" problem, but for a *struct layout* (a raw kernel-filled buffer)
+rather than a calling convention: write two throwaway programs against
+the exact same live resource (here, `fstat()` on the same fd) -- one
+using goken's own toolchain calling the raw syscall directly, one
+compiled with the host's real compiler (clang/gcc) calling the OS's
+own libc wrapper -- memset both destination buffers to a sentinel
+(0xAA) first so untouched bytes are visually obvious, dump both as raw
+hex (`write(1, buf, sizeof(buf))` piped to `xxd`, not a field-by-field
+print that could itself be wrong), and diff programmatically (a few
+lines of Python comparing byte-for-byte and reporting the first
+differing offset) rather than eyeballing two hex dumps side by side --
+manual hex comparison across 144 bytes produced a wrong conclusion
+here on the first pass, self-corrected only once the diff was made
+mechanical. This found that the real macOS arm64 raw `fstat` trap
+number (189) actually returns the OLD/legacy narrow stat struct, not
+the modern unified one a same-numbered syscall was assumed to return
+"because arm64 postdates the stat64 unification" -- an assumption that
+turned out to be simply wrong for this real (not qemu'd) host, and
+would never have been caught without a live, real-hardware byte
+comparison (nothing about it was visible from source or from reasoning
+about the ABI on paper). The actual fix was trap 339 (`SYS_fstat64`,
+same number as amd64 already used), confirmed byte-identical to the
+reference. When both the compiler-computed struct offsets (verified
+separately by printing pointer-subtraction "offsetof" results, since
+this C dialect has no `offsetof()` macro) and the struct DEFINITION
+match the real host's, but the bytes still land wrong, the remaining
+suspect is the syscall number/ABI itself, not the struct -- don't
+re-check the struct a third time once it's already been confirmed
+twice.
+
+How to verify live when the toolchain's own binaries aren't
+disassembler-readable: this project's linkers produce ELF/Mach-O files
+that `file` recognizes but `objdump -d` and `gdb`'s own symbol loader
+both reject outright ("file format not recognized") -- there is no
+"just disassemble it" option here. Two techniques stood in:
+
+  1. qemu-user's built-in GDB stub, for any arch other than the host's
+     own: `qemu-$arch -g 1234 ./binary args... &`, then
+     `gdb-multiarch -ex "target remote localhost:1234" -ex "set
+     architecture $arch" -ex "x/Ni $pc" -ex "info registers"`. gdb
+     still can't load symbols from the file (same "not recognized"
+     complaint), but it can single-step, dump registers, and dump raw
+     memory at any address on the *live* remote target regardless --
+     `x/Ni $pc` conveniently disassembles instructions AT the target
+     even though it could not load the file as an object. On the
+     host's own arch (here, arm64), the exact same recipe works
+     natively without qemu at all.
+  2. When even that address-finding is awkward (e.g. main's own
+     compiled entry point isn't a fixed, known address to break at
+     ahead of time), skip disassembly entirely: write a tiny, separate
+     C "debug helper" function with known, simple parameters (e.g.
+     `void dbg1(uintptr a) { print("a=%p\n", (void*)a); exits(nil); }`),
+     hand-write a throwaway entry stub that computes a candidate value
+     and calls the helper with it (`-E _dbgmain` to override the
+     linker's default entry symbol so this coexists with the real
+     rt0.s untouched), and read the printed result. This turns "what
+     is actually at this memory location" into an ordinary print-
+     debugging loop -- sweep a handful of candidate offsets (0, 4, 8,
+     12, 16, ...) this way rather than trying to compute the right one
+     by hand, since the auto-push amount above is exactly the kind of
+     fact this technique exists to pin down instead of assume.
+  3. When the bug only reproduces as one command inside a live,
+     multi-command repro script (see "a bug that only reproduces
+     inside a live repro script" below for how to first recognize this
+     shape at all) -- not standalone -- wrap just the failing command
+     in lldb *in place*, without extracting it from the script: `lldb
+     -b -s batchfile.txt -- ./binary args...` as that one line, where
+     batchfile.txt is a plain newline-separated command list (`run`,
+     `bt all`, `register read`, `quit`). This preserves the exact
+     process ancestry/fd/env state that the repro depends on while
+     still getting a live `EXC_BAD_ACCESS` backtrace and register dump
+     out of a linker output lldb cannot load symbols for -- the same
+     "no disassembler" constraint as above, solved the same way (live
+     inspection over static). Two rc-specific gotchas hit doing this:
+     passing multiple lldb `-o "command words"` flags inline breaks on
+     rc's quoting (a stray `"` ended up inside lldb's own argv) -- use
+     `-s batchfile.txt` instead, never inline `-o`; and rc's redirection
+     syntax is `>[2=1] file`, not `2>&1 file` -- getting this wrong
+     silently added an *extra* argv entry (the redirect target itself)
+     to the target program instead of erroring, which is worth knowing
+     before mis-reading the resulting argc as a clue.
+
+One tooling trap met while doing this: `ia` (the riscv/riscv64
+assembler, riscv64 via its `ja`/`jc`/`jl` aliases) reliably crashes
+with "stack smashing detected" on a *very short* standalone .s file
+assembled directly (as few as 2-3 instructions), but assembles the
+same real, larger rt0.s file (built through its normal mkfile, with
+several instructions and a trailing infinite loop) without any issue.
+Root cause not investigated -- unrelated to whatever fix is in
+progress when it's hit -- but worth recognizing immediately: pad
+throwaway probe files out to roughly the same shape as a real,
+already-working TEXT block (ending in the same `loop: JMP loop` idiom,
+rather than a bare `RET`) instead of spending time on the crash itself.
+
+Two non-lldb, non-otool gotchas on this host that both produce the
+*identical* symptom -- a build reports success (`exit=0`) but the
+output file "doesn't exist" moments later -- and are worth telling
+apart before suspecting the toolchain:
+
+- The agent shell's cwd can silently reset to a *different* configured
+  working directory (not just back to the primary repo root) after a
+  `cd` into a scratch/temp directory several tool-calls earlier. Check
+  with a plain `pwd` first; this is the more common self-inflicted
+  cause.
+- Separately, this host runs endpoint security software (observed:
+  CrowdStrike Falcon) that can quarantine/remove a freshly-built,
+  ad-hoc-signed executable within a very short window after creation
+  -- sometimes right after `codesign`, sometimes even before it. Not a
+  code bug: confirmed by watching a file exist under `ls -la` and then
+  fail to `open()` (via `file <binary>`) moments later in the *same*
+  shell invocation, with no error from the linker or codesign. No
+  reliable workaround found beyond retrying (usually works within a
+  few attempts) or building under a name/path not previously
+  quarantined this session; do not attempt to disable or bypass the
+  security tool itself.
+  - Confirming it's actually Falcon (not just guessing from an old
+    note): `ps aux | grep -i falcon` shows the system extension
+    (`com.crowdstrike.falcon.Agent`) plus several XPC services,
+    including `StaticAnalysis.bundle/.../FXPredictService.xpc` -- an
+    ML-based static-analysis component, and `log show` (the REAL
+    `/usr/bin/log` -- zsh has its own unrelated `log` builtin that
+    shadows it and fails with a cryptic "too many arguments" on a
+    normal predicate string) around the exact disappearance timestamp
+    shows a burst of dozens of `trustd: SecKeyVerifySignature` calls
+    within the same few milliseconds, consistent with something
+    actively re-verifying a freshly-written binary's signature.
+  - The race is NOT evenly spread across every binary this tree
+    builds: self-hosting the whole toolchain via `mk bootstrap`
+    (linkers/7l's notes_libc_selfhost.txt section), linkers/ar's own
+    output got hit far harder and more persistently than mk/rc/yacc/
+    lex/libmach built in the exact same run (5 retries insufficient,
+    20 needed) -- plausibly (not confirmed against CrowdStrike's own
+    inaccessible detection rules) because it's the one binary linking
+    lib_toolchain/libmach, which embeds a lot of raw Mach-O/ELF/PE
+    header and opcode-table data an ML static-analysis model may
+    weight as more suspicious than a plain compiler frontend. Worth
+    checking whether a future binary that also links libmach (acid,
+    nm) hits the same pattern, which would corroborate this.
+
+A bug that only reproduces inside a live repro script -- and looks
+like, but is NOT, the Falcon-quarantine gotcha above: `mk test_macos`
+(tests/c/hello_libc's target, 2026-08) reliably hit "Memory fault"
+running its 6th distinct freshly-built binary in the recipe, every
+single run, but the exact same binary always ran fine invoked by hand
+moments later. The surface symptom (a fresh binary crashing inside an
+automated script, fine standalone) is identical to the Falcon race
+above, and it's tempting to stop there -- but that race is
+*probabilistic* and *timing-based* ("usually works within a few
+attempts"), while this reproduced 100% of attempts, at exactly the
+same position, unaffected by inserting real delays. Two cheap checks
+tell them apart before assuming either:
+  1. Swap WHICH binary sits at the failing position (reorder the
+     recipe's commands) and rerun. If the crash follows the position
+     rather than the binary (here: whatever ran 6th crashed,
+     regardless of which of the 7 test binaries that was), the bug is
+     structural/deterministic, not file-specific flakiness.
+  2. Insert real `sleep`s (0.05s, then 1s) between each command and
+     rerun. A genuine AV-scan-timing race should shrink or disappear
+     as the delay grows; if the failure persists identically even with
+     1-second gaps, timing is not the variable and the AV-quarantine
+     explanation is ruled out.
+Both checks pointed away from Falcon here and toward a real,
+deterministic bug (see the rt0_darwin.s argv-bridge finding above,
+found via lldb per technique 3 two sections up) -- reading undefined
+stack memory that happens to differ (predictably, on this host) by
+how many prior processes the parent shell has forked, not by wall-clock
+time. Moral: "crashes only via the build script, fine standalone" is
+not, by itself, enough to diagnose the Falcon race -- run both checks
+above first.
+
+Bisecting a "mere presence of an unrelated call corrupts something else" bug
+------------------------------------------------------------------------------
+
+claude: grown out of the arm64_large_bss_sb_offset regression (see
+notes_arch_arm64.txt's own section) -- a shape of bug where adding one
+semantically-unrelated function call to main() (here: atoi(), inside a
+ternary whose branch never actually ran) made a *different*, unrelated
+part of the program crash later. This shape recurs in this codebase
+(todo.org's still-open knucleotide.c multi-object-file note is another
+instance) and is worth a dedicated approach rather than reasoning about
+the failing program directly.
+
+1. Reduce to the smallest C file that still reproduces, by literally
+   copying the failing source and deleting/simplifying one thing at a
+   time, rebuilding and rerunning after each cut -- not by reading the
+   code and guessing which part matters. Each step is one Write + one
+   7c/7l/run cycle; keep every intermediate file (a.c, b.c, c.c, ...)
+   rather than overwriting, so a later step can go back and re-check an
+   earlier hypothesis cheaply. This found, in order: the loop wasn't
+   needed (single call reproduced), the malloc size wasn't needed (100
+   bytes reproduced same as 5MB), argc/argv alone weren't sufficient
+   (needed the extra call too), and finally that the *unreached* atoi()
+   branch alone -- with no malloc/memset/print at all -- did nothing,
+   but adding back just one more real call (memset after malloc) turned
+   it into a crash. That last step is what pointed at "combination of
+   call *count*", not any single suspicious-looking line.
+2. Once the minimal repro exists, use it to test cross-arch: build and
+   run the *same* source for another arch via qemu-user (here: amd64
+   through qemu-x86_64, since the host is arm64) before touching any
+   compiler/linker source. A clean pass on another arch changes the
+   search space entirely -- from "logic bug in this C code" to
+   "codegen/linker bug specific to one backend" -- and costs one build
+   +run, far cheaper than any source-level investigation.
+3. To find *where* corruption actually happens (as opposed to where it
+   crashes, which can be arbitrarily far downstream -- here, a printf()
+   call that had nothing to do with the actual bug), run under
+   qemu-$arch's GDB stub even on the host's own native arch (`qemu-
+   aarch64 -g 1234 ./a.out &` then `gdb -ex "target remote :1234" -ex
+   c`); native execution alone gives you a core dump you may not have
+   permission to read (see below) and no way to inspect registers at
+   the exact faulting instruction. `x/Ni $pc`, `info registers`, and
+   `x/Nxg <addr>` at the crash point identify which register holds a
+   clearly-wrong value (garbage, or a value that decodes suspiciously
+   as a memset() fill byte repeated four times, etc.) and which
+   instruction produced it -- gdb still can't load this project's own
+   binaries as an "executable" (same "file format not recognized" as
+   noted elsewhere in this file), but remote register/memory inspection
+   doesn't need that.
+4. `ulimit -c unlimited` plus a native segfault does NOT reliably give
+   you a readable core file on a locked-down host -- here, apport
+   redirected it to a root-owned, `-r--------` file under
+   /var/lib/apport/coredump, unreadable without sudo. Don't spend time
+   fighting the OS's own crash-dump policy; go straight to the qemu-gdb
+   approach in (3), which sidesteps the host's core-dump handling
+   entirely by running the target under emulation regardless of host
+   arch.
+5. Once a specific instruction's encoded immediate looks wrong, decode
+   it by hand (a short Python snippet extracting the relevant bitfields
+   is faster and less error-prone than eyeballing hex) and compare the
+   decoded value against the *expected* value computed independently
+   (e.g. from the linker's own symbol-placement pass, see below) --
+   don't stop at "this looks wrong", compute what it should have been
+   and confirm the delta matches a specific, nameable failure mode
+   (here: the delta between the wrong and right address was exactly
+   0x10101010, i.e. a 4x-repeated 0x01 byte -- immediately recognizable
+   as memset(p,1,n)'s own fill pattern once you know to look for it,
+   which is what turned "some register has a weird value" into "this
+   register is reading stale memset'd memory instead of the intended
+   struct field").
+6. When the suspect is a linker internal pass (here: 7l's dodata(),
+   which assigns each global symbol's final offset by walking a hash
+   table -- not a resolvable-by-inspection order), add temporary
+   fprint(2, ...) instrumentation directly to that pass (gated behind
+   `getenv("SOMEDEBUG")` so it's opt-in), rebuild just that one tool
+   (`mk 'objtype=boot-gcc' install` in the tool's own directory -- see
+   the gotcha below), and diff its output between the working and
+   crashing link. This is far faster and more reliable than
+   reconstructing the same information by hand-decoding every relevant
+   instruction's encoded immediate -- use hand-decoding (step 5) to
+   find *which* symbols are suspect, then instrumentation to get their
+   *actual* assigned offsets directly from the source of truth, and use
+   the two together rather than either alone.
+7. Gotcha hit repeatedly this session: rebuilding one of this project's
+   own host tools (7l here) requires passing `objtype=boot-gcc`
+   explicitly on the `mk` command line when invoking `mk` directly
+   inside that tool's own directory (`cd linkers/7l && mk
+   'objtype=boot-gcc' install`) -- plain `mk install` there silently
+   resolves `$objtype` to empty (mkconfig's values are sourced as
+   *shell* variables by env.sh, not exported, so a bare `mk` invoked
+   directly doesn't see them the way it does when reached through the
+   top-level mkfile's own `<$TOP/mkconfig` include), producing
+   confusing, unrelated-looking compile failures ("-o: No such file or
+   directory") for a handful of source files instead of a clear "unset
+   variable" error. Same root cause as the already-documented goken9cc/
+   goken PATH-shadowing note; this is the mk-variable-scoping variant of
+   it. Same fix applies to running any of this project's own test
+   suites (e.g. `tests/mkfile`) directly instead of through the
+   top-level `mk test` -- those also assume the top-level mkfile's
+   objtype binding is already in scope and don't `<$TOP/mkconfig`
+   themselves.
+8. A regression test for this class of bug needs care in what it
+   actually asserts: writing and reading the *same* buggy L(R)-style
+   memory reference (`x = V; if(x != V)`) can pass even with the bug
+   present, if the write and the read both consistently compute the
+   same *wrong* address (confirmed empirically while writing this
+   session's own regression test -- the naive version didn't catch the
+   bug at all). Write through an independently-computed-correct address
+   (e.g. `p = &x; *p = V;`, which typically goes through different
+   compiler/linker codegen than a direct `x = V`) and read through the
+   specific path under test, so a wrong address shows up as a real
+   value mismatch instead of two wrongs silently agreeing.
+
+Driving an interactive REPL-style host tool (5i/vi) non-interactively under gdb
+----------------------------------------------------------------------------------
+
+machines/5i and machines/vi are themselves interactive debuggers (read
+a `:c`/`$q`-style command language from stdin, print to a Bio stream) --
+which makes a HOST-side crash inside one of them (as opposed to the
+guest program it's running) awkward to catch with a plain `gdb 5i` plus
+manual typing, since the crash only happens after the emulator has
+already accepted commands and started executing guest code.
+
+The fix is to give gdb the same stdin script scripts/qemu-runner-style
+callers already pipe in (`printf ':c\n$q\n' | 5i ./x.exe`), but via
+file redirection instead of a pipe, and set the guest binary as gdb's
+own `args` rather than folding it into `--args` alongside redirection
+(the two do not compose the way you'd expect -- `--args 5i ./x.exe`
+combined with `run < file` on the same line drops the program's own
+argv, and 5i falls back to its default guest name, `5.out`):
+
+    printf ':c\n$q\n' > /tmp/in.txt
+    gdb -q -batch \
+      -ex "set args ./x.exe" \
+      -ex "run < /tmp/in.txt" \
+      -ex "bt full" \
+      /path/to/5i
+
+`bt full` is what actually pays off here: it prints every frame's
+locals, not just the call chain, which is what turned a plain
+"SIGSEGV in sysfstat()" into "reg.r[REGARG] == 4294967295" -- the exact
+value that explained the bug (see notes_libc_selfhost.txt's stat-family
+section). Reading the crashing line's source alone would not have shown
+that REGARG and REGRET happened to be the same register at that point
+in the register file; the concrete runtime value did.
+
+Also worth noting: a plain (non-gdb) run of the same repro under bash
+segfaults with "core dumped" printed, but this box's apport handler
+intercepts the actual core file (`/proc/sys/kernel/core_pattern` pipes
+to `apport`), so there is nothing under `./core*` to load into gdb
+after the fact -- running the crash live under gdb from the start (as
+above) sidesteps that entirely, rather than fighting with core-dump
+configuration.
+
+A minimal repro that "fixes itself" standalone is a sign you're not
+calling the same function, not that the bug is flaky
+-----------------------------------------------------------------------------------
+
+Grown out of chasing an apparently arm64-specific rc bug (empty error
+text for `%r` after a failed dot-source, see notes_libc_selfhost.txt's
+"darwin/arm64 runtime verification" section for the full story) that
+turned out not to be a compiler bug at all. The trap: several
+progressively-closer standalone C programs (same format string, same
+errno value, same call depth even) all printed the CORRECT error text,
+while the real rc process, running the identical-looking `pfmt(err,
+"...: %r\n", ...)` line, kept printing nothing. Every one of those
+standalone repros "worked" for the same reason: they called libc's
+`strerror(errno)`/fmt.c's `%r` dispatch (`__errfmt`), because that's
+the only `%r` a fresh C program can reach. The real bug was that rc
+does NOT use libc's fmt.c at all for this -- it has its own `pfmt()`
+(rc/fmt.c) with its own hand-rolled `%r` case, calling `errstr()`
+(a completely different, Plan9-specific function) instead. A `%r` in
+one file is not the same code as a `%r` in another just because the
+verb character matches. The tell, once found: swapping the SUSPECT
+call from `%r` to an explicit `strerror(errno)` call in the SAME
+source file, at the SAME call site, "fixed" it -- which is only
+possible if `%r` was never routed through `strerror()` there in the
+first place. When a standalone reproduction keeps succeeding no matter
+how closely you match the failing call site's shape (args, types, call
+depth), stop trying to make the repro fail and instead grep for every
+definition of the function/macro/verb involved in the ACTUAL failing
+binary's own sources -- a same-named wrapper living in a
+project-specific file (here, rc/fmt.c shadowing libc/fmt/fmt.c) is easy
+to miss when the two are never `#include`d in the same place and both
+plausibly "belong" wherever the symbol resolves in your head.
+
+A stripped codesign signature after unrelated file operations looks
+exactly like a real crash -- check `codesign -dv` before debugging
+--------------------------------------------------------------------------------------------
+
+Same debugging round as above: a `git checkout -- <file>` (reverting
+scratch debug prints) on a source file, followed by rebuilding and
+re-running an unrelated already-working arm64 binary, produced a flat
+SIGKILL with no output at all -- indistinguishable at first glance from
+either the Falcon-quarantine race documented earlier in this file, or a
+genuine crash in whatever code was just touched. `codesign -dv
+<binary>` immediately told them apart: "code object is not signed at
+all" means the ad-hoc signature was silently invalidated by something
+in between (here: seemingly just file-metadata churn from `git
+checkout`, not even a rebuild of that exact binary), not a real
+process death. `codesign -s - -f <binary>` fixes it in one shot and
+the SAME invocation that just failed then succeeds immediately -- no
+retry-loop needed, unlike the actual Falcon race (which needs several
+attempts and doesn't respond to re-signing at all, since the FILE
+itself gets removed, not just de-signed). Worth checking `codesign -dv`
+first, before assuming a sudden SIGKILL on a previously-working binary
+is a new regression.
+
+`bin/mk`/`bin/rc` can be silently stale for days, and misbehave exactly
+like a real interpreter bug
+-----------------------------------------------------------------------------------
+
+Grown out of the same debugging round as the two entries above.
+scripts/promote-mk.sh's own header comment explains why `mk install`
+can't overwrite bin/mk or bin/rc in place ("Text file busy") -- but the
+flip side of that is a change to mk/ or rc/ source does NOT reach
+bin/mk or bin/rc until someone rebuilds for objtype=boot-gcc and reruns
+that script BY HAND, with no staleness warning anywhere in between.
+`bin/rc` sat 8 days stale (predating a real Updenv()/mkenv() fix to
+rc/unix.c, "cmpenv/mkenv/Updenv were commented out ... restored") long
+enough that a plain variable reassignment (`VAR=newvalue`) inside an rc
+script stopped propagating to real child processes' environment at
+all -- `echo $VAR` inside the SAME script correctly showed the new
+value (rc's own in-memory variable table was fine), but a forked child
+(`env`, or a nested `mk` invocation) still saw the ORIGINAL, pre-
+reassignment value. This looks exactly like a shell bug (and was
+initially treated as one, working around it with an external `env -u`
+wrapper before the real cause surfaced) -- but `bin/rc`'s own mtime
+(`ls -la bin/rc`, compare against `git log -1 -- rc/`) immediately told
+them apart. Rebuilding bin/rc (and bin/mk, same staleness, same reason)
+from current source and rerunning scripts/promote-mk.sh made the
+"bug" disappear instantly, no source change needed. Same lesson as the
+codesign entry above, different failure shape: before spending time
+debugging surprising behavior from a tool this tree bootstraps itself
+(mk, rc, the boot-gcc compilers), check whether the BINARY actually
+reflects the CURRENT source before suspecting the source is wrong.
+
+
+Swapping ONE component of a build pipeline at a time when a tool "works
+alone but fails under the build"
+------------------------------------------------------------------------
+
+Symptom that started this: during stage 2 of `mk bootstrap`, a
+self-hosted 7c failed on every single file with `7c: no error: u.h`,
+while the SAME 7c binary run by hand on the SAME file from the same
+directory succeeded.  Anything that only reproduces under the build has
+at least two candidate causes (the tool, and whatever is driving it),
+and guessing between them is what wastes the afternoon.
+
+The cheap discriminator is a 2x2: the pipeline here was {which mk} x
+{which 7c}, and both are just paths, so all four combinations are one
+command each.
+
+  boot-gcc mk   + boot-goken 7c (CC=<abs path>)  -> works
+  boot-goken mk + boot-goken 7c (from $PATH)     -> fails
+  boot-gcc mk   + boot-goken 7c (from $PATH)     -> works
+  boot-goken mk + boot-goken 7c (CC=<abs path>)  -> fails
+
+Two of those four are enough to name the culprit (it is the mk, not the
+compiler and not $PATH), and the other two make it airtight for the
+cost of thirty seconds.  Worth doing explicitly rather than reasoning
+about it: the failing message named the COMPILER and an include file,
+which is exactly the misdirection that keeps you reading lex.c's
+include search instead of the build driver.
+
+Then: strace the child to read the argv it was actually handed
+------------------------------------------------------------------------
+
+Once the driver was the suspect, `strace -f -e trace=openat,execve` on
+the failing run answered it in one line -- not from the openat calls
+(which merely confirmed the failure) but from the execve above them:
+
+  execve(".../7c", [".../7c", "-I../../include -I../../include/ALL -I. ...",
+                    "-o", "fmt/dofmt.7", "fmt/dofmt.c"], ...)
+
+The whole of $CFLAGS is ONE argv entry.  That is a fact about argument
+passing, invisible in every log the build itself produces -- mk's own
+recipe echo (shprint.c) prints the *substituted* recipe text, which
+looks perfectly normal and word-separated, and the shell's view is
+equally innocent.  The bug was mk exporting a multi-word variable
+joined by a space where rc splits only on '\1'.
+
+Generalization: when a program reports failing on an input it was
+"clearly" given correctly, read the real execve() argv rather than the
+build system's rendering of it.  The two agreeing is an assumption, and
+here that assumption was the entire bug.  This is a different use of
+strace from the "how far did it get before dying" one already recorded
+above -- here the interesting event is at process START, and the child
+matters, so -f is mandatory.
+
+A "transient" failure that always fails is not transient
+------------------------------------------------------------------------
+
+The same target carried a 20-attempt retry loop around each nested
+build, added on a macOS host to paper over binaries vanishing after a
+clean link, with a comment recording that "5 retries was not enough, 20
+needed here".  That reading was an artifact: the loop's success test
+was `~ $status ''`, which never matches under the rc that actually runs
+mk recipes, so the loop ALWAYS ran to exhaustion -- on every host,
+whether or not anything had failed -- and then continued anyway.  The
+retry count was measuring nothing but itself.
+
+Two lessons.  First, before trusting evidence of the form "it needed N
+retries", check that the loop can observe success at all; a
+success-detector that is wrong in the "always failed" direction
+manufactures exactly this kind of plausible, quantitative-looking
+folklore.  Second, a retry that swallows the failure and proceeds is
+strictly worse than no retry: it converts a hard error into a scrolled-
+past message, which is how three unrelated real bugs stayed hidden
+behind it until it was removed.

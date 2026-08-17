@@ -1,5 +1,5 @@
-#include	"../../src/cmd/cc/cc.h"
-#include	"../../linkers/7l/7.out.h"
+#include	"../cck/cc.h"
+#include	<obj/7.out.h>
 
 /*
  * 7c/arm64
@@ -125,7 +125,6 @@ struct	Reg
 };
 #define	R	((Reg*)0)
 
-#define	NRGN	1000		/* was 600; raised for paranoia.c */
 struct	Rgn
 {
 	Reg*	enter;
@@ -189,9 +188,6 @@ EXTERN	uchar	typechlpv[NTYPE];
 #define	CINF	1000
 #define	LOOP	3
 
-EXTERN	Rgn	region[NRGN];
-EXTERN	Rgn*	rgp;
-EXTERN	int	nregion;
 EXTERN	int	nvar;
 
 EXTERN	Bits	externs;
@@ -252,6 +248,7 @@ void	gargs(Node*, Node*, Node*);
 void	garg1(Node*, Node*, Node*, int, Node**);
 Node*	nodconst(int32);
 Node*	nod32const(vlong);
+Node*	nodgconst(vlong, Type*);
 Node*	nodfconst(double);
 void	nodreg(Node*, Node*, int);
 void	regret(Node*, Node*);
@@ -288,11 +285,11 @@ void	swit2(C1*, int, int32, Node*, Node*);
 void	casf(void);
 void	bitload(Node*, Node*, Node*, Node*, Node*);
 void	bitstore(Node*, Node*, Node*, Node*, Node*);
-int32	outstring(char*, int32);
+long	outstring(char*, long);
 int	mulcon(Node*, Node*);
 Multab*	mulcon0(int32);
 void	nullwarn(Node*, Node*);
-void	gextern(Sym*, Node*, int32, int32);
+void	gextern(Sym*, Node*, long, long);
 void	outcode(void);
 void	ieeedtod(Ieee*, double);
 

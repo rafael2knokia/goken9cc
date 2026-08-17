@@ -1,0 +1,6 @@
+TOP=../..
+
+test:V:
+	@{cd $TOP/machines/5i; mk}
+	@{cd ../s/mini; mk hello_plan9_arm.exe}
+	FIVEI=$TOP/machines/5i/o.out bash smoke.sh

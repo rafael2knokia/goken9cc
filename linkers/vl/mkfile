@@ -1,9 +1,8 @@
 TOP=../..
-<$TOP/mkconfig
 <$TOP/mkfiles/$objtype/mkfile
 
 TARG=vl
-LDLIBS=-lbio -l9 -lm
+LDLIBS=-lbio $BOOTLIBS
 
 OFILES=\
 	asm.$O\
@@ -20,12 +19,12 @@ OFILES=\
 
 #$TARGMODEL.$O\
 
-HFILES= l.h v.out.h $TOP/include/ar.h
+HFILES= l.h $TOP/include/obj/v.out.h $TOP/include/obj/ar.h
 
 <$TOP/mkfiles/mkone
 
 CLEANFILES=enam.c
-enam.c: v.out.h
+enam.c: $TOP/include/obj/v.out.h
 	sh mkenam
 
 %.$O:	../lk/%.c

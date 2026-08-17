@@ -1,0 +1,221 @@
+/*
+ * el/l.h -- wasm linker
+ *
+ * claude: modeled on linkers/5l/l.h's shape (Sym/Prog/Adr, obj.c
+ * reads into a Prog list, asm.c emits the final binary), but scaled
+ * way down: no archives (-l libs), no DUPOK-merge/auto-param/history/
+ * debugging/profiling/dynamic-relocation machinery -- none of that is
+ * needed to link one object file's worth of straight-line code into a
+ * module a wasm host can run. Extending this the way 5l grew (many
+ * arches, many object files, archives) is future work, not a redesign.
+ */
+#include	<u.h>
+#include	<libc.h>
+#include	<bio.h>
+
+#include	<obj/common.out.h>
+#include	<obj/e.out.h>
+
+typedef struct	Adr	Adr;
+typedef struct	Instr	Instr;
+typedef struct	Sym	Sym;
+typedef struct	Text	Text;
+typedef struct	Import	Import;
+
+/* claude: mirrors assemblers/ea/a.h's Gen exactly -- the wire format
+ * outopd() wrote is read back into this same shape by inopd() below. */
+struct	Adr
+{
+    short	type;	/* D_* "type" */
+    short	name;	/* D_* "name", meaningful only when type==D_OREG */
+    long	offset;
+    vlong	vval;	/* D_VCONST */
+    double	dval;	/* D_FCONST */
+    char	sval[NSNAME];	/* D_SCONST */
+    Sym*	sym;
+};
+
+struct	Instr
+{
+    int		as;	/* enum<as> */
+    Adr		from;
+    Adr		to;
+    Instr*	link;
+};
+
+enum Section
+{
+    SNONE = 0,
+    STEXT,		/* a defined function (from ATEXT) */
+    SBSS,		/* a GLOBL'd data symbol, byte content in data[] */
+    SIMPORT,	/* resolved via a -I flag to a host import */
+    SXREF,		/* referenced (e.g. by CALL) but not yet resolved */
+};
+
+struct	Sym
+{
+    char*	name;
+    short	type;	/* enum Section */
+    short	version;	/* 0 for D_EXTERN symbols; per-file for D_STATIC, see obj.c */
+
+    /* SBSS: linear-memory byte content, grown by DATA/GLOBL records.
+     * datasize is the logical/declared size asm.c's layout uses;
+     * datacap is data[]'s actual allocation, grown geometrically and
+     * otherwise unrelated to datasize -- see obj.c's growdata(). */
+    char*	data;
+    long	datasize;
+    long	datacap;
+
+    /* resolved by asm.c's layout pass */
+    long	value;	/* STEXT/SIMPORT: function index. SBSS: arena offset */
+
+    Sym*	link;	/* hash chain */
+    Sym*	link2;	/* asm.c's collectsyms(): SBSS symbols only */
+};
+#define	S	((Sym*)nil)
+
+struct	Text
+{
+    Sym*	sym;
+    long	framesize;
+    Instr*	first;
+    Instr*	last;
+    Text*	link;
+
+    /* claude: from ASIGNATURE (see e.out.h's comment): one char per
+     * parameter ('W'=i32/'Q'=i64/'F'=f32/'D'=f64), then the result
+     * type or 'V' for void. Defaults to "V" (no params, void result)
+     * for a Text with no ASIGNATURE record -- i.e. hand-written .s
+     * TEXT (ea has no compiler-level notion of a signature; see
+     * tests/s/mini/hello_wasm.s's _start, which takes no arguments
+     * and returns nothing a caller could use anyway).
+     */
+    char	sig[NSNAME];
+};
+
+/* claude: one entry per -I flag: `-I symbol=module.field[:sig]` tells
+ * el that an otherwise-undefined CALL target should become a wasm
+ * import instead of a link error, the same role 6lg's `-I thunk:sym:
+ * lib` plays for Mach-O dynamic imports (see tests/s/mini/mkfile's
+ * hello_macos_libc_amd64 recipe) -- adapted to wasm's two-level
+ * (module, field) import naming instead of a library path. `sig` is
+ * optional and defaults to DEFAULTIMPORTSIG (WASI's own fd_write
+ * shape, the only import v1 originally had) when omitted -- every
+ * `-I` flag before this comment predates per-import signatures and
+ * still works unchanged. A second, differently-shaped import (WASI's
+ * proc_exit, `(i32) -> ()`, wired up for tests/c/mini2/helloprintf_wasm.c's
+ * exit()) is what forced this from "one hardcoded shape" to "one sig
+ * string per Import", the same shape Text.sig already carries for a
+ * defined function -- asm.c's sigindex()/emittype() already worked
+ * per-signature and needed no changes, only asm.c's import-section
+ * loop did (see its own comment).
+ */
+struct	Import
+{
+    char*	symname;
+    char*	module;
+    char*	field;
+    char	sig[NSNAME];
+    Import*	link;
+};
+
+/* claude: shared with main.c (parses -I) and asm.c (its own former
+ * IMPORTSIG local #define, now just this default) -- see Import's
+ * comment above. */
+#define	DEFAULTIMPORTSIG	"WWWWW"
+
+/*
+ * claude: a DATA value that is itself a symbol's address (`DATA
+ * iov+0(SB)/4, $msg(SB)`) can't be patched into targetsym->data while
+ * reading the object file: msg's own arena address isn't known until
+ * asm.c's layout pass has assigned one to every symbol. Real linkers
+ * solve the general version of this (forward/circular refs *across
+ * object files*, plus branch-distance feedback loops) with a full
+ * relocation table; el only reads one file and wasm branches are
+ * depth- not distance-based, so all that's needed here is: lay out
+ * every symbol first, then apply this short deferred-patch list,
+ * then emit code (which can look up already-resolved sym->value
+ * directly, no relocation bookkeeping needed on the code side at all).
+ */
+struct	DataReloc
+{
+    Sym*	targetsym;
+    long	targetoff;
+    int	width;
+    Sym*	refsym;
+    long	addend;
+    struct DataReloc* link;
+};
+typedef struct DataReloc DataReloc;
+
+#define	NHASH	1009
+
+extern	Sym*	hash[NHASH];
+extern	Text*	firsttext;
+extern	Text*	lasttext;
+extern	Text*	curtext;
+extern	Import*	imports;
+extern	DataReloc*	datarelocs;
+extern	char*	outfile;
+extern	Biobuf	obuf;
+extern	int	nerrors;
+
+/*
+ * claude: modeled on linkers/6l/obj.c's own `version` -- bumped once per
+ * input file readobj() reads, so a D_STATIC (file-local, e.g. ec's own
+ * per-file `.string` blob) ANAME resolves through lookup() with a
+ * nonzero, file-unique version instead of colliding by bare name with
+ * another file's same-named static. D_EXTERN symbols always look up
+ * with version 0, so cross-file CALL/GLOBL references still resolve to
+ * the same Sym the way they must.
+ */
+extern	int	version;
+
+Sym*	lookup(char*, int);
+Text*	newtext(Sym*);
+Instr*	newinstr(int, Adr*, Adr*);
+void	addimport(char*, char*, char*, char*);
+
+void	readobj(char*);
+
+void	asmb(void);
+
+/*
+ * optab.c: one real wasm opcode encoding per e.out.h opcode -- the
+ * counterpart of every other arch's Optab/oplook(), simplified since
+ * wasm has no addressing-mode-dependent variants of the same
+ * instruction to classify between (a real arch's oplook() picks among
+ * several Optab rows per opcode via aclass(); here every opcode has
+ * exactly one encoding, so the table is keyed by opcode alone). Also
+ * simpler than an earlier draft of this file that had a virtual
+ * AMOVx: every real instruction now has at most one operand (never
+ * ia->from, only ip->to), so there's no more "one vs two operand"
+ * branch in asm.c either.
+ */
+enum
+{
+    OSIMPLE,	/* one fixed byte, no operand */
+    OSIMPLE2,	/* two fixed bytes (opcode + a required immediate byte) */
+    OBR,	/* br/br_if: opcode + uleb depth */
+    OCALL,	/* call: opcode + resolved function index */
+    OLOCAL,	/* local.get/set/tee: opcode + uleb local index */
+    OGLOBAL,	/* global.get/set: opcode + uleb global index */
+    OCONSTI,	/* iNN.const: opcode + sleb value (or a resolved address) */
+    OCONSTF,	/* fNN.const: opcode + 4 or 8 raw bytes, see fsize */
+    OMEM,	/* iNN.loadNN/storeNN: opcode + fixed align=0 + uleb offset */
+};
+
+typedef struct	Optab	Optab;
+struct	Optab
+{
+    int	as;
+    int	kind;
+    int	op;		/* primary wasm opcode byte */
+    int	op2;		/* OSIMPLE2's required immediate byte */
+    int	fsize;		/* OCONSTF: 4 (f32) or 8 (f64) */
+};
+
+Optab*	oplook(int);
+
+void	diag(char*, ...);
+void	errorexit(void);

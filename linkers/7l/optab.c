@@ -131,6 +131,12 @@ Optab	optab[] =
 	{ AMOVW,	C_ADDR,	C_NONE,	C_REG,		65, 8, 0,	LFROM },
 	{ AMOVBU,	C_ADDR,	C_NONE,	C_REG,		65, 8, 0,	LFROM },
 
+	//NEW: mov $addr(SB), R for macOS PIE executables: the address is
+	// computed pc-relatively with ADRP/ADD instead of being loaded as
+	// an absolute constant from the literal pool (hence no LFROM),
+	// because ASLR relocates the whole executable at exec time
+	{ AMOV,		C_ADDR,	C_NONE,	C_REG,		66, 8, 0 },
+
 	{ AMUL,		C_REG,	C_REG,	C_REG,		15, 4, 0 },
 	{ AMUL,		C_REG,	C_NONE,	C_REG,		15, 4, 0 },
 	{ AMADD,		C_REG,	C_REG,	C_REG,		15, 4, 0 },
@@ -219,35 +225,64 @@ Optab	optab[] =
 	{ AMOV,	C_NSOREG,C_NONE,	C_REG,	21, 4, REGSP },
 
 	/* long displacement store */
-	{ AMOVB,	C_REG,	C_NONE,	C_LEXT,		30, 8, REGSB },  // 
-	{ AMOVB,	C_REG,	C_NONE,	C_LAUTO,	30, 8, REGSP },  // 
-	{ AMOVB,	C_REG,	C_NONE,	C_LOREG,	30, 8, 0 },  // 
-	{ AMOVH,	C_REG,	C_NONE,	C_LEXT,		30, 8, REGSB },  // 
-	{ AMOVH,	C_REG,	C_NONE,	C_LAUTO,	30, 8, REGSP },  // 
-	{ AMOVH,	C_REG,	C_NONE,	C_LOREG,	30, 8, 0 },  // 
-	{ AMOVW,	C_REG,	C_NONE,	C_LEXT,		30, 8, REGSB },  // 
-	{ AMOVW,	C_REG,	C_NONE,	C_LAUTO,	30, 8, REGSP },  // 
-	{ AMOVW,	C_REG,	C_NONE,	C_LOREG,	30, 8, 0 },  // 
-	{ AMOV,	C_REG,	C_NONE,	C_LEXT,		30, 8, REGSB },  // 
-	{ AMOV,	C_REG,	C_NONE,	C_LAUTO,	30, 8, REGSP },  // 
-	{ AMOV,	C_REG,	C_NONE,	C_LOREG,	30, 8, 0 },  // 
+	// claude: LTO on the C_LEXT rows only (not C_LAUTO/C_LOREG, whose
+	// base is a runtime register, not a link-time-constant address) --
+	// see asmout.c case 30's comment. Needed so span() actually calls
+	// addpool() for these, populating p->cond for omovlit() to use.
+	{ AMOVB,	C_REG,	C_NONE,	C_LEXT,		30, 8, REGSB,	LTO },  //
+	{ AMOVB,	C_REG,	C_NONE,	C_LAUTO,	30, 8, REGSP },  //
+	{ AMOVB,	C_REG,	C_NONE,	C_LOREG,	30, 8, 0 },  //
+	/* claude: AMOVBU was missing every C_LEXT/C_LAUTO/C_LOREG row its
+	 * signed counterpart AMOVB has (found compiling mk.c for the first
+	 * time on this arch/GOOS combo -- a function with a stack frame
+	 * over 32K bytes needs a MOVBU past C_UAUTO4K, and there was no
+	 * optab row at all for it beyond that, "illegal combination MOVBU
+	 * ... NONE REG"). movesize()/opldr12() (asmout.c) already handle
+	 * AMOVBU generically alongside AMOVB in cases 30/31 -- this was
+	 * purely a missing dispatch-table entry, not a missing encoder.
+	 * Confirmed against 9front's own sys/src/cmd/7l/optab.c, which has
+	 * the same six AMOVBU rows -- so this is a real, independently-hit
+	 * gap, not something invented here. One deliberate difference from
+	 * 9front, though, matching this file's own AMOVB rows just above
+	 * (see that comment): 9front sets LTO/LFROM on all three of its
+	 * AMOVBU rows (C_LEXT/C_LAUTO/C_LOREG alike), whereas here LTO/
+	 * LFROM stays on the C_LEXT row only -- C_LAUTO/C_LOREG's base is
+	 * a runtime register (SP or a general register), not a link-time
+	 * constant address, so span() has no pool entry to add for them. */
+	{ AMOVBU,	C_REG,	C_NONE,	C_LEXT,		30, 8, REGSB,	LTO },  //
+	{ AMOVBU,	C_REG,	C_NONE,	C_LAUTO,	30, 8, REGSP },  //
+	{ AMOVBU,	C_REG,	C_NONE,	C_LOREG,	30, 8, 0 },  //
+	{ AMOVH,	C_REG,	C_NONE,	C_LEXT,		30, 8, REGSB,	LTO },  //
+	{ AMOVH,	C_REG,	C_NONE,	C_LAUTO,	30, 8, REGSP },  //
+	{ AMOVH,	C_REG,	C_NONE,	C_LOREG,	30, 8, 0 },  //
+	{ AMOVW,	C_REG,	C_NONE,	C_LEXT,		30, 8, REGSB,	LTO },  //
+	{ AMOVW,	C_REG,	C_NONE,	C_LAUTO,	30, 8, REGSP },  //
+	{ AMOVW,	C_REG,	C_NONE,	C_LOREG,	30, 8, 0 },  //
+	{ AMOV,	C_REG,	C_NONE,	C_LEXT,		30, 8, REGSB,	LTO },  //
+	{ AMOV,	C_REG,	C_NONE,	C_LAUTO,	30, 8, REGSP },  //
+	{ AMOV,	C_REG,	C_NONE,	C_LOREG,	30, 8, 0 },  //
 
 	/* long displacement load */
-	{ AMOVB,		C_LEXT,	C_NONE,	C_REG,		31, 8, REGSB },  // 
-	{ AMOVB,		C_LAUTO,C_NONE,	C_REG,		31, 8, REGSP },  // 
-	{ AMOVB,		C_LOREG,C_NONE,	C_REG,		31, 8, 0 },  // 
+	// claude: LFROM on the C_LEXT rows only, same reasoning as the LTO
+	// rows above.
+	{ AMOVB,		C_LEXT,	C_NONE,	C_REG,		31, 8, REGSB,	LFROM },  //
+	{ AMOVB,		C_LAUTO,C_NONE,	C_REG,		31, 8, REGSP },  //
+	{ AMOVB,		C_LOREG,C_NONE,	C_REG,		31, 8, 0 },  //
 	{ AMOVB,		C_LOREG,C_NONE,	C_REG,		31, 8, 0 },	//
-	{ AMOVH,		C_LEXT,	C_NONE,	C_REG,		31, 8, REGSB },  // 
-	{ AMOVH,		C_LAUTO,C_NONE,	C_REG,		31, 8, REGSP },  // 
-	{ AMOVH,		C_LOREG,C_NONE,	C_REG,		31, 8, 0 },  // 
+	{ AMOVBU,		C_LEXT,	C_NONE,	C_REG,		31, 8, REGSB,	LFROM },  //
+	{ AMOVBU,		C_LAUTO,C_NONE,	C_REG,		31, 8, REGSP },  //
+	{ AMOVBU,		C_LOREG,C_NONE,	C_REG,		31, 8, 0 },  //
+	{ AMOVH,		C_LEXT,	C_NONE,	C_REG,		31, 8, REGSB,	LFROM },  //
+	{ AMOVH,		C_LAUTO,C_NONE,	C_REG,		31, 8, REGSP },  //
+	{ AMOVH,		C_LOREG,C_NONE,	C_REG,		31, 8, 0 },  //
 	{ AMOVH,		C_LOREG,C_NONE,	C_REG,		31, 8, 0 },	//
-	{ AMOVW,		C_LEXT,	C_NONE,	C_REG,		31, 8, REGSB },  // 
-	{ AMOVW,		C_LAUTO,C_NONE,	C_REG,		31, 8, REGSP },  // 
-	{ AMOVW,		C_LOREG,C_NONE,	C_REG,		31, 8, 0 },  // 
+	{ AMOVW,		C_LEXT,	C_NONE,	C_REG,		31, 8, REGSB,	LFROM },  //
+	{ AMOVW,		C_LAUTO,C_NONE,	C_REG,		31, 8, REGSP },  //
+	{ AMOVW,		C_LOREG,C_NONE,	C_REG,		31, 8, 0 },  //
 	{ AMOVW,		C_LOREG,C_NONE,	C_REG,		31, 8, 0 },	//
-	{ AMOV,		C_LEXT,	C_NONE,	C_REG,		31, 8, REGSB },  // 
-	{ AMOV,		C_LAUTO,C_NONE,	C_REG,		31, 8, REGSP },  // 
-	{ AMOV,		C_LOREG,C_NONE,	C_REG,		31, 8, 0 },  // 
+	{ AMOV,		C_LEXT,	C_NONE,	C_REG,		31, 8, REGSB,	LFROM },  //
+	{ AMOV,		C_LAUTO,C_NONE,	C_REG,		31, 8, REGSP },  //
+	{ AMOV,		C_LOREG,C_NONE,	C_REG,		31, 8, 0 },  //
 	{ AMOV,		C_LOREG,C_NONE,	C_REG,		31, 8, 0 },	//
 
 	/* load long effective stack address (load long offset and add) */
@@ -335,6 +370,27 @@ Optab	optab[] =
 	{ AFMOVS,	C_LAUTO,C_NONE,	C_FREG,		31, 8, REGSP,	LFROM },
 	{ AFMOVS,	C_LOREG,C_NONE,	C_FREG,		31, 8, 0,	LFROM },
 
+	/* claude: AFMOVD (double) was missing this whole C_LEXT/C_LAUTO/
+	 * C_LOREG family that its AFMOVS (float) sibling right above
+	 * already has -- found self-hosting compilers/7c, which embeds
+	 * enough float/double constants (mpatof.c's own pows10<> table,
+	 * float literal nodes) to need SB-relative FMOVD access beyond the
+	 * short-displacement C_UAUTO32K/C_UOREG32K tiers above.
+	 * movesize()/opldr12() (asmout.c) already handle AFMOVD generically
+	 * alongside AFMOVS in cases 30/31 -- purely a missing dispatch-table
+	 * entry, not a missing encoder, same shape as the AMOVBU gap this
+	 * file already fixed. Mirrors AFMOVS's own LTO/LFROM-on-all-three
+	 * shape here (unlike AMOVB/AMOVH/AMOVW/AMOV's own C_LEXT-only
+	 * convention above) -- confirmed against 9front's own optab.c,
+	 * which has these same six AFMOVD rows in this same shape. */
+	{ AFMOVD,	C_FREG,	C_NONE,	C_LEXT,		30, 8, REGSB,	LTO },
+	{ AFMOVD,	C_FREG,	C_NONE,	C_LAUTO,	30, 8, REGSP,	LTO },
+	{ AFMOVD,	C_FREG,	C_NONE,	C_LOREG,	30, 8, 0,	LTO },
+
+	{ AFMOVD,	C_LEXT,	C_NONE,	C_FREG,		31, 8, REGSB,	LFROM },
+	{ AFMOVD,	C_LAUTO,C_NONE,	C_FREG,		31, 8, REGSP,	LFROM },
+	{ AFMOVD,	C_LOREG,C_NONE,	C_FREG,		31, 8, 0,	LFROM },
+
 	{ AFMOVS,	C_FREG,	C_NONE,	C_ADDR,		64, 8, 0,	LTO },
 	{ AFMOVS,	C_ADDR,	C_NONE,	C_FREG,		65, 8, 0,	LFROM },
 
@@ -376,10 +432,13 @@ Optab	optab[] =
 	{ ADMB,		C_LCON,	C_NONE, 	C_NONE,		51, 4, 0 },
 	{ AHINT,		C_LCON,	C_NONE,	C_NONE,		52, 4, 0 },
 
+	{ ALDAR,		C_ZOREG,	C_NONE,	C_REG,		58, 4, 0 },
 	{ ALDXR,		C_ZOREG,	C_NONE,	C_REG,		58, 4, 0 },
-	{ ALDXP,		C_ZOREG,	C_REG,	C_REG,		58, 4, 0 },
+	{ ALDAXR,		C_ZOREG,	C_NONE, C_REG,		58, 4, 0 },
+
+	{ ASTLR,		C_REG,	C_NONE,	C_ZOREG,		59, 4, 0 },
 	{ ASTXR,		C_REG,	C_REG,	C_ZOREG,		59, 4, 0 },
-	{ ASTXP,		C_REG, C_REG,	C_ZOREG,		59, 4, 0 },
+	{ ASTLXR,		C_REG,	C_REG,	C_ZOREG,		59, 4, 0 },
 
 	{ AAESD,	C_VREG,	C_NONE,	C_VREG,	29, 4, 0 },
 	{ ASHA1C,	C_VREG,	C_REG,	C_VREG,	1, 4, 0 },

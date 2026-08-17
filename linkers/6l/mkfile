@@ -1,0 +1,30 @@
+TOP=../..
+<$TOP/mkfiles/$objtype/mkfile
+
+TARG=6l
+LDLIBS=-lbio $BOOTLIBS
+OFILES=\
+	asm.$O\
+	obj.$O\
+	optab.$O\
+	pass.$O\
+	span.$O\
+	list.$O\
+	enam.$O\
+	compat.$O\
+	elf.$O\
+	macho.$O\
+	pe.$O\
+
+HFILES= l.h $TOP/include/obj/6.out.h ../lk/elf.h ../lk/macho.h ../lk/pe.h
+
+<$TOP/mkfiles/mkone
+
+enam.$O:	$TOP/compilers/6c/enam.c
+	$CC $CFLAGS $TOP/compilers/6c/enam.c
+elf.$O:	../lk/elf.c
+	$CC $CFLAGS ../lk/elf.c
+macho.$O:	../lk/macho.c
+	$CC $CFLAGS ../lk/macho.c
+pe.$O:	../lk/pe.c
+	$CC $CFLAGS ../lk/pe.c

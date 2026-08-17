@@ -1,4 +1,4 @@
-/*s: machine/5i/mem.c */
+/*s: 5i/mem.c */
 /*s: basic includes */
 #include <u.h>
 #include <libc.h>
@@ -25,20 +25,36 @@ ifetch(uintptr addr)
     if(icache.on)
         updateicache(addr);
     /*e: [[ifetch()]] instruction cache handling */
-    iprof[(addr-textbase)/PROFGRAN]++;
+    /* claude: iprof[] is sized only for the Text segment
+     * (initmemory() allocates (end-base)/PROFGRAN entries), but until
+     * now this increment ran unconditionally on any addr, before
+     * page_of_vaddr() below gets a chance to validate it against the
+     * mapped segments. A PC that strays outside Text (e.g. from the
+     * Ib()/Ibl() branch-offset sign-extension bug) turned this into
+     * an out-of-bounds write that corrupted or crashed 5i itself
+     * (host-level fault) instead of getting page_of_vaddr()'s
+     * graceful "User TLB miss" error. Guard it with the same bound so
+     * a bad PC always goes through that graceful path. */
+    if(addr >= textbase && addr < memory.seg[Text].end)
+        iprof[(addr-textbase)/PROFGRAN]++;
+
 
     va = page_of_vaddr(addr); // get page
     va += addr&(BY2PG-1); // restore offset in page
 
+    // claude: va[3]<<24|... is still computed as a plain (32-bit) int
+    // and can look "negative" when va[3]>=0x80, but instruction is now
+    // u32int (not ulong), so that bit pattern is reinterpreted, not
+    // sign-extended, on return -- see the typedef comment in arm.h
     return va[3]<<24 | va[2]<<16 | va[1]<<8 | va[0];
 }
 /*e: function [[ifetch]] */
 
 /*s: function [[getmem_4]] */
-ulong
+u32int
 getmem_4(uintptr addr)
 {
-    ulong val;
+    u32int val;
     int i;
 
     val = 0;
@@ -63,11 +79,11 @@ getmem_2(uintptr addr)
 /*e: function [[getmem_2]] */
 
 /*s: function [[getmem_w]] */
-ulong
+u32int
 getmem_w(uintptr addr)
 {
     byte *va;
-    ulong w;
+    u32int w;
 
     if(addr&3) {
         w = getmem_w(addr & ~3);
@@ -85,6 +101,7 @@ getmem_w(uintptr addr)
     va = page_of_vaddr(addr);
     va += addr&(BY2PG-1);
 
+    // claude: see the comment in ifetch() above -- same reasoning
     return va[3]<<24 | va[2]<<16 | va[1]<<8 | va[0];
 }
 /*e: function [[getmem_w]] */
@@ -344,4 +361,4 @@ page_of_vaddr(uintptr addr)
     return nil;		/*to stop compiler whining*/
 }
 /*e: function [[page_of_vaddr]] */
-/*e: machine/5i/mem.c */
+/*e: 5i/mem.c */

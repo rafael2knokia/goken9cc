@@ -1,0 +1,576 @@
+# Micro-benchmarks originally from the CompCert project (see pad.txt),
+# used here to compare gcc/clang -O0 vs -O3, and (see the 'goken'/
+# 'goken_bench' targets and GOKENPROGS further down) goken's own Xc/Xa/
+# Xl pipeline at -O0/-O3 too, for whichever subset of this corpus it can
+# already build. gcc -O0 is the fixed baseline every variant is compared
+# against, in bench and across compilers -- see bench.sh.
+#
+# Modeled after ./Makefile (the original CompCert GNU Makefile for this
+# corpus) but using mk/rc instead of make/bash, and gcc/clang instead of
+# ccomp.
+#
+#   mk              # just compile everything (gcc/clang, -O0 and -O3)
+#   mk test         # compile + check stdout of every program against Results/
+#   mk goken_bench  # compile GOKENPROGS with goken itself, at -O0 and -O3
+#                   #  (needs lib_core/libc built+installed for $cputype
+#                   #  first -- see the 'goken' target's own comment)
+#   mk bench        # compile + timing summary, all variants vs gcc -O0
+#                   #  (run 'mk goken_bench' first to include goken's own
+#                   #  columns -- bench.sh degrades to "n/a" without it)
+#   mk clean
+
+GCC=gcc
+CLANG=clang
+# -fgnu89-inline: spectral.c's `inline double eval_A(...)` has no other
+# definition in the translation unit. Under gcc/clang's default (C99/gnu11)
+# inline semantics that's only valid if the compiler actually inlines
+# every call; at -O0 it doesn't, so the plain -O0 build fails to link
+# ("undefined reference to eval_A"). gnu89 inline semantics always keep a
+# callable out-of-line copy, so both -O0 and -O3 link either way.
+CFLAGS=-Wall -fgnu89-inline
+LIBS=-lm
+
+PROGS=fib integr qsort fft fftsp fftw sha1 sha3 aes almabench \
+	lists binarytrees fannkuch knucleotide mandelbrot nbody \
+	nsieve nsievebits spectral vmach \
+	bisect chomp perlin siphash24
+
+# gcc-O0 is the baseline (see VARIANTS in bench.sh); -O3 is each
+# compiler's "fastest" in a way still directly comparable to the others
+# (no -Ofast/-ffast-math, which could also break the Results/ diff on the
+# floating-point-heavy benchmarks like almabench/fftw).
+GCCO0BINS=${PROGS:%=%.gcc-O0}
+GCCO3BINS=${PROGS:%=%.gcc-O3}
+CLANGO0BINS=${PROGS:%=%.clang-O0}
+CLANGO3BINS=${PROGS:%=%.clang-O3}
+
+all:V: $GCCO0BINS $GCCO3BINS $CLANGO0BINS $CLANGO3BINS
+
+%.gcc-O0: %.c
+	$GCC $CFLAGS -O0 -o $target $stem.c $LIBS
+
+%.gcc-O3: %.c
+	$GCC $CFLAGS -O3 -o $target $stem.c $LIBS
+
+%.clang-O0: %.c
+	$CLANG $CFLAGS -O0 -o $target $stem.c $LIBS
+
+%.clang-O3: %.c
+	$CLANG $CFLAGS -O3 -o $target $stem.c $LIBS
+
+# Each program prints to stdout and must match Results/<prog> exactly.
+# Piped through /dev/stdin rather than the more common 'cmp - foo': this
+# project builds and installs its own cmp/diff (utilities/compare/), and
+# those open() their arguments literally instead of special-casing '-' as
+# stdin, so 'cmp -s - Results/$i' silently "FAILED" every entry once
+# ROOT/arch/$objtype/bin is ahead of the system cmp on $PATH. /dev/stdin is a
+# real path any cmp can open, so it works with either implementation.
+test:V: all
+	anyfailed=()
+	for(opt in gcc-O0 gcc-O3 clang-O0 clang-O3){
+		echo '--' $opt '--'
+		for(i in $PROGS){
+			if(./$i.$opt | cmp -s /dev/stdin Results/$i)
+				echo $i': passed'
+			if not {
+				echo $i': FAILED'
+				anyfailed=1
+			}
+		}
+	}
+	# claude: `if(cond)` with no `if not` leaves $status set to the
+	# *condition check's own* status when cond is false (a documented
+	# rc pitfall this project's own tests/rc/if_no_else_status.sh
+	# already covers) -- as the last statement in the recipe, that
+	# leftover nonzero status from `~` not matching would make mk
+	# think this recipe failed even when anyfailed was never set.
+	# Explicit if-not avoids it.
+	if(~ $anyfailed 1)
+		exit failed
+	if not
+		exit 0
+
+# Timing summary, every variant vs the gcc -O0 baseline. The arithmetic
+# (best-of-N, speedup ratios) is easier in bash than rc, so that part
+# alone lives in bench.sh; see its header for why it uses bash's `time`
+# builtin instead of an external command, and VARIANTS for the compiler
+# list (extend it there, not here, for any future compiler/level).
+bench:V: all
+	bash bench.sh $PROGS
+
+clean:V:
+	rm -f $GCCO0BINS $GCCO3BINS $CLANGO0BINS $CLANGO3BINS
+	rm -f *.[5678vij] $GOKENBINS $GOKENO0BINS $GOKENO3BINS
+
+# goken's own toolchain (Xc/Xa/Xl), one program + one arch via
+# 'mk 'cputype='<arch> goken' (defaults to $cputype from mkconfig, e.g.
+# arm64). The arch->tool-letter table below (copied from mkfiles/
+# {5,6,7,8,v,i,j}/mkfile) is spelled out as plain rc variables inside
+# the recipe, rather than pulled in via the shared mkfiles/$objtype/
+# mkfile include like tests/ does: that include also (re)defines
+# $CFLAGS/$CC/$LD, which this file already uses for the gcc/clang
+# targets above, so reusing it here would silently clobber them (mk's
+# variable expansion is late-bound to a value's *final* assignment in
+# the file, not a snapshot at point of use -- there's no mk-level way
+# to save a copy first).
+#
+# include/APE/ (a minimal, *not* full Plan9 APE) maps stdio.h ->
+# u.h+libc.h (printf aliased to print) so these UNIX-style benchmark
+# sources build against goken's own self-hosted libc.a (lib_core/libc/)
+# unmodified. That libc.a needs to be built+installed for the target
+# arch first:
+#   cd $TOP/lib_core/libc && mk 'objtype='<arch> 'cputype='<arch> install
+#
+# fib, integr, lists, fftw, fannkuch, nsieve, nsievebits, perlin,
+# spectral, nbody, fft, sha1, qsort, chomp, almabench, fftsp are wired
+# up so far, each needing progressively more of include/APE/ (stdio.h's
+# putc/putchar/stdout/NULL/size_t/atoi/atol, stdlib.h/stddef.h/
+# string.h/math.h/assert.h/ctype.h now genuinely empty -- everything
+# they'd declare is already reachable via stdio.h, which every program
+# here includes -- see stdio.h's own comment for the scoped assumption
+# this relies on). malloc/calloc/free are lib_core/libc/port/
+# minimal_malloc.c, a deliberately temporary bump allocator (see its
+# own header comment). floor/sqrt/sin/cos/exp/log/pow/fmod/atan/atan2/
+# asin/acos are lib_core/libc/port/{floor,sqrt,sin,exp,log,pow,fmod,
+# atan,atan2,asin}.c, and rand()/qsort() are lib_core/libc/port/
+# {rand,qsort}.c plus lib_core/libc/math/lrand.c (already present, just
+# never compiled in before) -- all ported from
+# ~/principia/lib_core/libc/port/, self-contained given frexp/ldexp/
+# modf/NaN/isNaN/isInf already existed here. qsort()/rand() also
+# needed two libc.h #includes that existed as header files
+# (include/base/sort.h, include/rand/random.h) but were never actually
+# wired into libc.h's own #include chain -- same "anticipated,
+# stubbed, never finished" shape as calloc's own commented-out
+# declaration (include/core/mem.h) before this pass. almabench.c
+# needed stdio.h to #undef PI right after pulling it in from
+# include/math/basic.h (used internally by e.g. atan2.c, but never
+# meant to be visible to APE-shimmed application code) -- see
+# stdio.h's own comment for why that's safe. fftsp.c needed cosf/
+# sinf/fabsf, which don't exist as genuine single-precision
+# implementations here -- stdio.h just widens to double, calls the
+# existing cos/sin/fabs, and narrows back (fine for this consumer,
+# which only wants reference/consistency checking, not exact
+# single-precision rounding at every step). bisect.c needed two
+# things: stdio.h gained stderr/fprintf/fputs (deliberately narrower
+# than the real, variadic fprintf -- see stdio.h's own comment), and
+# bisect.c's own `#define DBL_EPSILON 0x1p-52` -- a C99 hex-float
+# literal this compiler's lexer can't parse at all (see
+# tests/c/regressions/hexfloat_literal.c for the isolated repro) --
+# was changed directly to its decimal equivalent (see that file's own
+# comment for why it's the exact same double value, not a new one, and
+# why that doesn't affect the gcc/clang comparison this same file is
+# also built for below). aes.c's own endianness detection used
+# `#if defined(__ppc__) || ...` / `#elif defined(__i386__) || ...`,
+# which goken's own preprocessor can't parse at all ("unknown #: if"),
+# rewritten to a chain of plain #ifdef/#ifndef/#else/#endif (no #if,
+# no #elif at all -- see aes.c's own comment for the full reasoning,
+# including a second, independent #elif-plus-defined() bug this
+# uncovered along the way: it compiles with no error but silently
+# always evaluates false, so a mechanical #if -> #ifdef, #elif ->
+# #elif swap would have quietly miscompiled instead of just failing
+# loudly). Careful to still check the *same* real gcc/clang-predefined
+# macros (__ppc__/__PPC__), not just something that happens to still
+# resolve correctly on this project's own little-endian hosts --
+# gcc/clang built this same file both before and after, confirmed
+# passing both times, not just goken. The new #elif-plus-defined()
+# bug is captured minimally at
+# tests/c/regressions/elif_defined_silent_false.c, same "documented,
+# unfixed, not wired into test:V:" treatment as the other two.
+# vmach.c needed its `stack[]`/local `sp` pointer widened from `long`
+# to `long long` (see the comment above wordcode_interp() in vmach.c
+# itself for why), which then surfaced a genuine 7c bug --
+# `if (some_vlong_expr)` silently emitted no compare-and-branch at all
+# on arm64 -- fixed in the compiler (src/cmd/cc/pgen.c's bcomplex()),
+# not worked around here, per tests/c/regressions/
+# arm64_vlong_if_branch.c's full writeup.
+# sha3.c needed two of the same uvlong compiler/linker fixes as vmach.c
+# above (see tests/c/regressions/arm64_uvlong_shift32.c) plus one more,
+# specific to this file: its round-constant table used bare (no U/L/
+# ULL suffix) hex literals, several needing more than 32 bits, which
+# this toolchain's lexer silently truncates instead of promoting to
+# vlong/uvlong (a real, still-unfixed, project-wide lexer gap -- see
+# tests/c/regressions/hex_const_no_suffix_truncated.c and
+# docs/claude_notes/notes_shared_frontend_bugs.txt) -- worked around
+# here by adding explicit ULL suffixes (a complete no-op for gcc/
+# clang, which already inferred that type themselves), same "safe,
+# semantically-neutral source edit" shape as bisect.c's DBL_EPSILON
+# fix above, not a fix to the lexer itself given its much larger blast
+# radius (every integer literal compiled by this toolchain, not just
+# this one table).
+#
+# siphash24.c needed the same two uvlong compiler/linker fixes as
+# vmach.c/sha3.c above (see tests/c/regressions/arm64_uvlong_shift32.c)
+# plus a fourth, distinct one: SIPROUND's `v2 ^= 0xff;` (a small
+# constant XORed into a 64-bit variable) corrupted the *upper* 32 bits
+# of the destination too. Differential tracing plus progressive source
+# minimization (see docs/claude_notes/notes_debug_techniques.txt)
+# narrowed it to a single EOR instruction; root cause was in linkers/
+# 7l/asmout.c's immediate-logical-op encoding (case 53): a small value
+# like 0xFF is a genuine, self-contained 64-bit ARM64 bitmask immediate
+# (8 contiguous one-bits, no rotation) requiring the full 64-bit
+# element size, but the N-bit ("is this a genuine 64-bit-wide pattern")
+# was only set when the *raw value* happened to have nonzero upper
+# bits -- true for most large constants, but false for small ones like
+# 0xFF whose upper 32 bits are legitimately zero despite still needing
+# the 64-bit encoding. Getting N wrong made the hardware replicate the
+# pattern into the upper 32 bits it should never have touched. Fixed
+# in the compiler/linker, not worked around here (no source-level
+# workaround exists for "a 64-bit XOR with an integer literal was ever
+# wrong") -- see docs/claude_notes/notes_arch_arm64.txt and
+# tests/c/regressions/arm64_bitcon_upper_bits.c for the full writeup
+# and isolated repro. Also hardened (belt-and-suspenders, not directly
+# what caused this bug but a real latent issue found along the way):
+# isbitcon()'s separate 32-bit-replicated-pattern fallback no longer
+# gets applied to a genuinely 64-bit-width instruction.
+#
+# mandelbrot.c needed no source changes at all -- both bugs it exposed
+# were genuine toolchain bugs, found via its `putc(byte_acc, stdout)`
+# inner loop (byte_acc takes on every value 0-255 while building up a
+# PBM image bit-by-bit, an unusually thorough exerciser of %c/putc()).
+# A previous pass's "Still blocked" note here mischaracterized the
+# symptom as a 7c/7a MOVB zero-extension bug -- that theory didn't pan
+# out; the two real root causes were both elsewhere:
+# (1) include/APE/stdio.h's `#define putc(c, stream) print("%c",
+#     (c))` expanded wrong whenever byte_acc's own variable name
+#     collided with the macro's parameter name spelling as it happened
+#     to inside the macro body's own string literal -- a preprocessor
+#     bug (parameter substitution incorrectly applying inside a string
+#     literal), present identically in all three frontend forks this
+#     tree builds against. See tests/c/regressions/
+#     cpp_macro_param_in_string.c and docs/claude_notes/
+#     notes_shared_frontend_bugs.txt.
+# (2) Once past that, every byte_acc value with the high bit set
+#     (128-255) written via %c silently produced *no output at all* --
+#     a runtime-library bug in lib_core/libc/fmt/dofmt.c's __charfmt(),
+#     which routed through UTF-8-decoding logic meant for text (%s/%q),
+#     not a single raw byte. Fixed in fmt/dofmt.c (shared, not
+#     per-arch) -- see tests/c/regressions/fmt_charfmt_high_bit.c and
+#     docs/claude_notes/notes_libc_selfhost.txt.
+# Output now matches Results/mandelbrot byte-for-byte.
+#
+# Still blocked, each for a different reason (not pursued further this
+# pass -- see docs/claude_notes/notes_libc_selfhost.txt for anything
+# investigated in depth):
+# - binarytrees.c: a real bug, deeply investigated but not yet
+#   root-caused -- no longer assumed related to mandelbrot's two bugs
+#   above now that those are both confirmed fixed and unrelated in
+#   mechanism (a preprocessor substitution bug and a %c/UTF-8-decoding
+#   bug, neither of which involves pointers). Precisely characterized,
+#   100% deterministic (not a probabilistic memory-corruption symptom):
+#   ItemCheck(), recursively traversing a perfect binary tree of depth
+#   D (2^(D+1)-1 nodes), makes exactly that many correct calls and then
+#   exactly ONE extra spurious call with tree==NULL immediately after --
+#   verified identical in shape at D=8,10,12,14,16,17,18. Triggered
+#   specifically by main() containing a pow() call *anywhere* in its
+#   body (even in a loop never reached before the crash) -- removing
+#   just that one pow()-using line, everything else identical, makes
+#   the exact same tree/traversal run to completion with zero extra
+#   calls. Confirmed NOT address-magnitude-dependent (artificially
+#   padding the heap to the same address range without pow() present
+#   never reproduces it) and NOT a bug in any of NewTreeNode/ItemCheck/
+#   BottomUpTree/DeleteTree/main()'s own compiled code (all four
+#   functions, plus main()'s shared prefix and its prologue/epilogue,
+#   are byte-identical between the crashing and non-crashing builds,
+#   modulo relocation) -- so the trigger is a link-time/layout side
+#   effect of pow()'s mere presence, not anything pow() itself computes
+#   at runtime. Root cause still open. Full writeup of everything ruled
+#   in/out, plus a *separate*, unrelated bug found along the way
+#   (reading argv[1] crashes immediately on darwin/arm64, not exercised
+#   by this benchmark's own no-args invocation), in todo.org's "7c
+#   (compiler)" section, not a notes_*.txt file (per docs/claude_notes/
+#   README's own convention: those are for done, verified work, and
+#   this isn't done yet).
+# - knucleotide.c: needs a real FILE*/fopen/fgets/fclose/realloc/
+#   strdup -- a much bigger step than every other program here, none
+#   of which touch real file I/O.
+#
+# Extend GOKENPROGS as more get wired up, and fold this into
+# bench.sh's VARIANTS/test/bench alongside it.
+#
+# arm64 on a Darwin host: %.goken's `$gl` (7l here) has no explicit -H
+# flag, so it falls back to the host's own compiled-in GOOS default
+# (linkers/7l/obj.c's HEADTYPE==-1 case) -- a real -H6 Mach-O on this
+# machine, needing lib_core/libc's arm64 libc.a to have been built with
+# GOOS=darwin (see lib_core/libc/mkfile) and ad-hoc signing (done by
+# the $TOP/scripts/macos-codesign call below) before it will run.
+# test_goken_macos_arm64 exercises this directly, no qemu.
+TOP=../..
+# Only for the cputype/objtype/ostype defaults (so plain 'mk goken' works
+# without an explicit 'cputype='<arch>) -- deliberately not
+# $TOP/mkfiles/$objtype/mkfile, which also (re)defines $CFLAGS/$CC/$LD and
+# would clobber the gcc/clang variables this file already set above (see
+# comment below on the %.goken recipe for why the arch->tool-letter table
+# is spelled out here instead of pulled in from there too).
+<$TOP/mkconfig
+GOKENPROGS=fib integr lists fftw fannkuch nsieve nsievebits perlin spectral nbody fft sha1 qsort chomp almabench fftsp bisect aes vmach sha3 siphash24 mandelbrot
+GOKENBINS=${GOKENPROGS:%=%.goken}
+GOKENCFLAGS=-I$TOP/include -I$TOP/include/ALL -I$TOP/include/APE -I$TOP/include/arch/$cputype -I.
+
+goken:V: $GOKENBINS
+
+%.goken: %.c
+	switch($cputype){
+	case arm64
+		gc=7c; gl=(7l); go=7
+	case amd64
+		gc=6c; gl=(6l); go=6
+	case 386
+		gc=8c; gl=(8l); go=8
+	case arm
+		gc=5c; gl=(5l -H7); go=5
+	case mips
+		gc=vc; gl=(vl); go=v
+	case riscv
+		gc=ic; gl=(il); go=i
+	case riscv64
+		gc=jc; gl=(jl); go=j
+	case *
+		echo 'goken: unsupported cputype: '$cputype >[1=2]
+		exit 1
+	}
+	$gc $GOKENCFLAGS -D$cputype -c $stem.c
+	$gl -L$TOP/ROOT/arch/$cputype/lib -o $target -E _main $stem.$go -lc
+	$TOP/scripts/macos-codesign $target
+
+# goken-O0/goken-O3: same as %.goken above (see its own comment for the
+# libc.a prerequisite and the arch->tool-letter table), but passing -O0/
+# -O3 (docs/claude_notes/notes_frontend_optlevels.txt) to $gc, so
+# bench.sh's VARIANTS can compare goken against gcc/clang at both ends
+# of the optimization range the same way it already does for them.
+# Deliberately two new pattern rules rather than folding -O into %.goken
+# itself: test_goken/test_goken_archs (below) only care about *one*
+# variant's correctness, at whatever level plain %.goken happens to
+# build at (today, that's the same as -O3, optlevel's own default --
+# see cc.h -- but those targets don't need to know or care), and
+# shouldn't have to build two extra binaries per prog just for that.
+# -o $stem-O0.$go / $stem-O3.$go (rather than plain %.goken's $stem.$go)
+# gives each variant its own intermediate object filename: %.goken,
+# %.goken-O0 and %.goken-O3 all compile the same $stem.c, and mk's own
+# parallelism (this project's build commonly runs with $NPROC jobs, see
+# env.sh) could otherwise interleave two of these three recipes for the
+# same prog, each overwriting the other's same-named $stem.$go mid-link.
+GOKENO0BINS=${GOKENPROGS:%=%.goken-O0}
+GOKENO3BINS=${GOKENPROGS:%=%.goken-O3}
+
+goken_bench:V: $GOKENO0BINS $GOKENO3BINS
+
+%.goken-O0: %.c
+	switch($cputype){
+	case arm64
+		gc=7c; gl=(7l); go=7
+	case amd64
+		gc=6c; gl=(6l); go=6
+	case 386
+		gc=8c; gl=(8l); go=8
+	case arm
+		gc=5c; gl=(5l -H7); go=5
+	case mips
+		gc=vc; gl=(vl); go=v
+	case riscv
+		gc=ic; gl=(il); go=i
+	case riscv64
+		gc=jc; gl=(jl); go=j
+	case *
+		echo 'goken: unsupported cputype: '$cputype >[1=2]
+		exit 1
+	}
+	$gc -O0 $GOKENCFLAGS -D$cputype -c -o $stem-O0.$go $stem.c
+	$gl -L$TOP/ROOT/arch/$cputype/lib -o $target -E _main $stem-O0.$go -lc
+	$TOP/scripts/macos-codesign $target
+
+%.goken-O3: %.c
+	switch($cputype){
+	case arm64
+		gc=7c; gl=(7l); go=7
+	case amd64
+		gc=6c; gl=(6l); go=6
+	case 386
+		gc=8c; gl=(8l); go=8
+	case arm
+		gc=5c; gl=(5l -H7); go=5
+	case mips
+		gc=vc; gl=(vl); go=v
+	case riscv
+		gc=ic; gl=(il); go=i
+	case riscv64
+		gc=jc; gl=(jl); go=j
+	case *
+		echo 'goken: unsupported cputype: '$cputype >[1=2]
+		exit 1
+	}
+	$gc -O3 $GOKENCFLAGS -D$cputype -c -o $stem-O3.$go $stem.c
+	$gl -L$TOP/ROOT/arch/$cputype/lib -o $target -E _main $stem-O3.$go -lc
+	$TOP/scripts/macos-codesign $target
+
+# Self-sufficient (rebuilds lib_core/libc for $cputype first, so this
+# also works as the entry point called from the top-level `mk test` --
+# see root mkfile's own `test:` target), unlike goken/%.goken above,
+# which just document the libc.a prerequisite instead of building it.
+# 'mk install' is cheap to call unconditionally: mk only rebuilds
+# objects that actually changed.
+#
+# SKIPQEMU (unset by default, so plain 'mk test_goken' always exercises
+# the real qemu-user path, same as before): when set to 1 AND $cputype
+# matches the host's own uname(1) arch, runs the .goken binaries
+# directly instead of through qemu-runner. qemu-user emulating the
+# *same* arch as the host (e.g. qemu-aarch64 on an aarch64 host) is
+# real emulation overhead with no correctness benefit -- some of these
+# progs (nbody, aes, spectral) are CPU-heavy enough that this is a very
+# real slowdown, not just theoretical, found running this on an aarch64
+# host once this became part of the top-level `mk test` (see root
+# mkfile's own `test:` target, which passes SKIPQEMU=1 -- deliberately
+# only in that context, so this target's own default behavior, and
+# anyone deliberately wanting the qemu path even same-arch, are
+# unaffected). Only maps the uname(1) spellings that actually show up
+# as goken hosts today; anything else keeps using qemu-runner.
+#
+# 'mk clean' first is not optional: %.goken's mtime-based dependency
+# (`%.goken: %.c`) can't distinguish one cputype's build from another's
+# -- the filename is the same regardless of target arch. Running this
+# target for mips then later for arm64, without cleaning in between,
+# leaves the mips-compiled foo.goken sitting there looking "up to date"
+# to mk (its mtime is newer than foo.c's, which is all mk checks), so
+# the arm64 run silently skips recompiling it and tries to run the
+# mips binary as-is -- which binfmt_misc/qemu-user happily does (it
+# only looks at the ELF header, not what the caller expected), so this
+# doesn't even fail loudly: it just runs the wrong architecture under
+# emulation and compares its output against arm64's expected results.
+# Found via exactly this sequence after migrating vc/ic (see git log)
+# and manually running `mk 'cputype=mips' test_goken` in this same
+# directory afterward -- the *next* top-level `mk test` picked up the
+# leftover mips .goken binaries.
+test_goken:V:
+	mk clean
+	@{ cd $TOP/lib_core/libc; mk 'objtype='$cputype 'cputype='$cputype install }
+	mk 'cputype='$cputype goken
+	usenative=()
+	if(~ $SKIPQEMU 1) {
+		hostuname=`{uname -m}
+		switch($hostuname){
+		case x86_64
+			hostcputype=amd64
+		case aarch64
+			hostcputype=arm64
+		case i386 i686
+			hostcputype=386
+		case armv6l armv7l armv8l
+			hostcputype=arm
+		case riscv64
+			hostcputype=riscv64
+		case mips mips64
+			hostcputype=mips
+		case *
+			hostcputype=unknown
+		}
+		if(~ $cputype $hostcputype)
+			usenative=1
+	}
+	anyfailed=()
+	for(p in $GOKENPROGS){
+		if(~ $usenative 1)
+			ok=`{./$p.goken | cmp -s /dev/stdin Results/$p; echo $status}
+		if not
+			ok=`{$TOP/scripts/qemu-runner $cputype ./$p.goken | cmp -s /dev/stdin Results/$p; echo $status}
+		# $status after a pipe is rc's multi-stage "N|M" form, not a
+		# single exit code -- match the trailing '|0' (cmp, the last
+		# stage) rather than comparing $ok to a plain 0.
+		if(~ $ok *'|0')
+			echo $p': passed ('$cputype')'
+		if not {
+			echo $p': FAILED ('$cputype')'
+			anyfailed=1
+		}
+	}
+	# claude: this loop used to always exit 0 regardless of any FAILED
+	# line above -- the top-level `mk test` (root mkfile's own `test:`)
+	# calls this target as its last step, so a real arm64 regression
+	# (nsieve/nsievebits/spectral, see docs/claude_notes/
+	# notes_arch_arm64.txt) printed FAILED here but `mk test` still
+	# reported success. Propagate failure like tests/s/regressions/
+	# mkfile's own `exit failed` convention already does elsewhere in
+	# this codebase.
+	# claude: `if(cond)` with no `if not` leaves $status set to the
+	# *condition check's own* status when cond is false (a documented
+	# rc pitfall this project's own tests/rc/if_no_else_status.sh
+	# already covers) -- as the last statement in the recipe, that
+	# leftover nonzero status from `~` not matching would make mk
+	# think this recipe failed even when anyfailed was never set.
+	# Explicit if-not avoids it.
+	if(~ $anyfailed 1)
+		exit failed
+	if not
+		exit 0
+
+# Same as test_goken above, but across every cputype goken's %.goken rule
+# switches on, one qemu-user emulator per arch (see scripts/qemu-runner's
+# own arch table), reporting a prog x arch matrix instead of a flat
+# passed/FAILED list -- the build-vs-run-vs-output-mismatch bookkeeping
+# needed for that table is easier in bash, so (like bench.sh) it lives in
+# its own script; see test_goken_archs.sh's header for the PASS/COMPFAIL/
+# RUNFAIL/MISMATCH cell meanings and why 'mk -a -k' is required for the
+# per-arch build step. Needs lib_core/libc's libc.a already built+
+# installed for every arch below first (see the 'goken' comment above for
+# the one-arch version of that same command); this target does not do
+# that rebuild itself, same "prerequisite, not automated" treatment as
+# plain goken/test_goken above.
+GOKENARCHS=386 amd64 arm arm64 mips riscv riscv64
+test_goken_archs:V:
+	bash test_goken_archs.sh $GOKENARCHS -- $GOKENPROGS
+
+# macOS-native (no qemu): 'goken' below already produces and
+# ad-hoc-signs a real -H6 Mach-O on a Darwin host by default (7l falls
+# back to the host's own compiled-in GOOS when no -H flag is given --
+# see linkers/7l/obj.c's HEADTYPE==-1 case), so this just runs it
+# directly, same spirit as tests/c/hello_libc/mkfile's
+# test_macos_arm64. cputype is forced to arm64 here (unlike test_goken
+# above, which uses whatever $cputype the caller passed) since amd64
+# needs its own separate recipe below, not just a different cputype --
+# see its comment for why. The explicit libc.a rebuild+reinstall
+# (GOOS=darwin, forced with -a after an 'rm -f libc.a') is not
+# optional: found the hard way (a real "Bad system call" / SIGSYS
+# crash, not just a lucky pass/fail) that %.goken's implicit-Mach-O
+# default silently links against *whatever* libc.a happens to already
+# be installed at $TOP/ROOT/arch/arm64/lib -- if that's a linux/arm64
+# one (e.g. left over from rebuilding lib_core/libc for the qemu-based
+# test_goken path, or from tests/c/hello_libc's own regression
+# checks), the resulting Mach-O executes real Linux syscall numbers
+# under XNU, which the kernel rejects outright. Same shared-install-
+# path footgun as tests/c/hello_libc/mkfile's test_macos_arm64 already
+# guards against; see docs/claude_notes/notes_libc_selfhost.txt.
+test_goken_macos_arm64:V:
+	@{ cd $TOP/lib_core/libc; rm -f libc.a; mk -a 'objtype=arm64' 'cputype=arm64' 'GOOS=darwin' install }
+	mk -a 'cputype=arm64' goken
+	for(p in $GOKENPROGS){
+		if(./$p.goken | cmp -s /dev/stdin Results/$p)
+			echo $p': passed (macos/arm64)'
+		if not
+			echo $p': FAILED (macos/arm64)'
+	}
+
+# macOS-native amd64 (no qemu; runs via Rosetta 2 on Apple Silicon, or
+# natively on an Intel Mac): unlike arm64 above, this can NOT just
+# reuse the shared %.goken/goken rule with cputype=amd64, for the same
+# reason tests/c/hello_libc/mkfile's hello_macos_amd64.exe needed its
+# own separate rule instead of reusing hello.exe's: 6l -H6 is always
+# PIE, but plain 6c happily folds a symbol's address into an
+# instruction as an absolute immediate, which 6l then can't encode
+# against a Mach-O PIE target ("doasm: notfound"). Needs `-z` on
+# *every* 6c compile involved, including libc.a's own (fmtalloc, used
+# by fmt/fmt.c, is exactly such a symbol) -- see
+# tests/c/hello_libc/mkfile's test_macos_amd64 for the fuller
+# writeup, and docs/claude_notes/notes_exec_macho.txt for the general
+# story. GOOS=darwin plus CFLAGS_EXTRA=-z on the libc.a install line
+# mirrors that exactly, then the actual fib.c compile also needs -z
+# directly (unlike arm64, which never needs anything beyond the plain
+# %.goken recipe).
+test_goken_macos_amd64:V:
+	@{ cd $TOP/lib_core/libc; rm -f libc.a; mk -a 'objtype=amd64' 'cputype=amd64' 'GOOS=darwin' 'CFLAGS_EXTRA=-z' 'RT0OFILE=arch/amd64/rt0_darwin.6' install }
+	for(p in $GOKENPROGS){
+		6c -I$TOP/include -I$TOP/include/ALL -I$TOP/include/APE -I$TOP/include/arch/amd64 -I. -Damd64 -z -c $p.c
+		6l -L$TOP/ROOT/arch/amd64/lib -s -H6 -o $p.goken -E _main $p.6 -lc
+		$TOP/scripts/macos-codesign $p.goken
+		if(./$p.goken | cmp -s /dev/stdin Results/$p)
+			echo $p': passed (macos/amd64)'
+		if not
+			echo $p': FAILED (macos/amd64)'
+	}

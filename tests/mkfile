@@ -1,6 +1,48 @@
 TOP=..
-<$TOP/mkconfig
 
-DIRS=s/mini c rc
+DIRS=s c rc libmach 5i vi
+
+# Dirs holding macOS-native run tests, by host arch (coverage differs:
+# c/vlong and c/float only have arm64 stubs). Paths are relative to here;
+# each dir's mkfile exposes a test_macos_<arch> target. Driven from the
+# top-level `mk test_macos`, which auto-detects Apple Silicon vs Intel.
+# c/hello_libc is the odd one out here: its test_macos_arm64/amd64 also
+# rebuild+reinstall lib_core/libc's own darwin/$arch libc.a first (see
+# that mkfile's own comment) since it's the only dir here linking
+# against the real libc.a rather than a per-test stub -- so it's also
+# the one that actually exercises lib_core/libc/syscall/os/darwin/.
+MACOS_ARM64_DIRS=s/mini c/mini c/mini2 c/vlong c/float c/hello_libc
+MACOS_AMD64_DIRS=s/mini c/mini c/mini2 c/hello_libc
+
+# Dirs holding Windows-native run tests (PE binaries executed directly,
+# no wine, since the host running `mk test_windows` IS Windows). Each
+# dir's mkfile exposes a test_windows target. Driven from the top-level
+# `mk test_windows`. c/hello_libc is the odd one out here too, same
+# story as MACOS_ARM64_DIRS/MACOS_AMD64_DIRS's own comment above: it
+# also rebuild+reinstalls lib_core/libc's windows/amd64 libc.a first
+# (see that dir's mkfile), since it's the only one linking against the
+# real libc.a rather than a per-test stub.
+WINDOWS_DIRS=s/mini c/mini c/mini2 c/hello_libc
 
 <$TOP/mkfiles/mkdirs
+
+test_macos_arm64:V:
+	for(i in $MACOS_ARM64_DIRS) @{
+		echo $i
+		cd $i
+		mk test_macos_arm64
+	}
+
+test_macos_amd64:V:
+	for(i in $MACOS_AMD64_DIRS) @{
+		echo $i
+		cd $i
+		mk test_macos_amd64
+	}
+
+test_windows:V:
+	for(i in $WINDOWS_DIRS) @{
+		echo $i
+		cd $i
+		mk test_windows
+	}

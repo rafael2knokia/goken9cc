@@ -3,27 +3,6 @@
 #include "y.tab.h"
 #include <ctype.h>
 
-//goken: new, was partially in a.h before
-enum
-{
-	Plan9	= 1<<0,
-	Unix	= 1<<1,
-	Windows	= 1<<2,
-};
-int
-systemtype(int sys)
-{
-	return sys&Plan9;
-}
-
-//goken: was in 6a but not 5a, so let's be consistent
-int
-pathchar(void)
-{
-	return '/';
-}
-
-
 void
 main(int argc, char *argv[])
 {
@@ -32,14 +11,10 @@ main(int argc, char *argv[])
 
 	thechar = 'v';
 	thestring = "mips";
-
-	ensuresymb(NSYMB);
 	memset(debug, 0, sizeof(debug));
 	cinit();
 	outfile = 0;
-	//goken: was include[ninclude++] = ".";
-	setinclude(".");
-
+	include[ninclude++] = ".";
 	ARGBEGIN {
 	default:
 		c = ARGC();
@@ -82,20 +57,16 @@ main(int argc, char *argv[])
 		c = 0;
 		nout = 0;
 		for(;;) {
-		  //goken: remove myxxx() and switch to regular xxx()
-		  Waitmsg *w;
-
 			while(nout < nproc && argc > 0) {
-				i = fork();
+				i = myfork();
 				if(i < 0) {
-					//i = mywait(&status);
-					//if(i < 0)
-				         fprint(2, "fork: %r\n");
+					i = mywait(&status);
+					if(i < 0)
 						errorexit();
-					//if(status)
-					//	c++;
-					//nout--;
-					//continue;
+					if(status)
+						c++;
+					nout--;
+					continue;
 				}
 				if(i == 0) {
 					print("%s:\n", *argv);
@@ -107,16 +78,13 @@ main(int argc, char *argv[])
 				argc--;
 				argv++;
 			}
-			//i = mywait(&status);
-			//if(i < 0) {
-			w = wait();
-			if(w == nil) {
+			i = mywait(&status);
+			if(i < 0) {
 				if(c)
 					errorexit();
 				exits(0);
 			}
-			//if(status)
-			if(w->msg[0])
+			if(status)
 				c++;
 			nout--;
 		}
@@ -129,10 +97,10 @@ main(int argc, char *argv[])
 int
 assemble(char *file)
 {
-	char ofile[100], incfile[20], *p;
+	char *ofile, *p;
 	int i, of;
 
-	strcpy(ofile, file);
+	ofile = strdup(file);
 	p = utfrrune(ofile, pathchar());
 	if(p) {
 		include[0] = ofile;
@@ -140,16 +108,13 @@ assemble(char *file)
 	} else
 		p = ofile;
 	if(outfile == 0) {
-		outfile = p;
-		if(outfile){
+		if(p) {
+			outfile = p;
 			p = utfrrune(outfile, '.');
 			if(p)
 				if(p[1] == 's' && p[2] == 0)
 					p[0] = 0;
-			p = utfrune(outfile, 0);
-			p[0] = '.';
-			p[1] = thechar;
-			p[2] = 0;
+			outfile = smprint("%s.%c", outfile, thechar);
 		} else
 			outfile = "/dev/null";
 	}
@@ -157,14 +122,11 @@ assemble(char *file)
 	if(p) {
 		setinclude(p);
 	} else {
-		if(systemtype(Plan9)) {
-			sprint(incfile,"/%s/include", thestring);
-			setinclude(strdup(incfile));
-		}
+		if(systemtype(Plan9))
+			setinclude(smprint("/%s/include", thestring));
 	}
 
-	//goken: of = mycreat(outfile, 0664);
-	of = create(outfile, OWRITE, 0664);
+	of = mycreat(outfile, 0664);
 	if(of < 0) {
 		yyerror("%ca: cannot create %s", thechar, outfile);
 		errorexit();
@@ -173,9 +135,6 @@ assemble(char *file)
 
 	pass = 1;
 	pinit(file);
-
-	Bprint(&obuf, "%s\n", thestring);
-
 	for(i=0; i<nDlist; i++)
 		dodefine(Dlist[i]);
 	yyparse();
@@ -183,8 +142,6 @@ assemble(char *file)
 		cclean();
 		return nerrors;
 	}
-
-	Bprint(&obuf, "\n!\n");
 
 	pass = 2;
 	outhist();
@@ -378,6 +335,8 @@ struct
 	"MOVWR",	LTYPE3, AMOVWR,
 	"MOVVL",	LTYPE3, AMOVVL,
 	"MOVVR",	LTYPE3, AMOVVR,
+	"LL",		LTYPE3, ALL,
+	"SC",		LTYPE3, ASC,
 
 	"BREAK",	LTYPEJ, ABREAK,		/* overloaded CACHE opcode */
 	"END",		LTYPE4, AEND,
@@ -385,6 +344,7 @@ struct
 	"REMU",		LTYPE6, AREMU,
 	"RET",		LTYPE4, ARET,
 	"SYSCALL",	LTYPE4, ASYSCALL,
+	"SYNC",		LTYPE4, ASYNC,
 	"TLBP",		LTYPE4, ATLBP,
 	"TLBR",		LTYPE4, ATLBR,
 	"TLBWI",	LTYPE4, ATLBWI,
@@ -736,5 +696,6 @@ outhist(void)
 	}
 }
 
-#include "../../src/cmd/cc/lexbody"
-#include "../../src/cmd/cc/macbody"
+#include "../../compilers/cck/lexbody"
+#include "../../compilers/cck/macbody"
+#include "../../compilers/cck/compat"

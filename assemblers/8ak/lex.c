@@ -851,7 +851,8 @@ outhist(void)
 			p += 2;
 			c = *p;
 		}
-		if(p && p[0] != c && h->offset == 0 && pathname){
+		/* claude: -r produces reproducible output: don't embed the cwd in history */
+		if(!debug['r'] && p && p[0] != c && h->offset == 0 && pathname){
 			/* on windows skip drive specifier in pathname */
 			if(systemtype(Windows) && pathname[1] == ':') {
 				op = p;
@@ -903,5 +904,5 @@ outhist(void)
 	}
 }
 
-#include "../../compilers/cc/lexbody"
-#include "../../compilers/cc/macbody"
+#include "../../compilers/cck/lexbody"
+#include "../../compilers/cck/macbody"

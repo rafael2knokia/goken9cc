@@ -46,7 +46,12 @@ sched(Prog *p0, Prog *pe)
 
     //pad: I added that to disable sched() to more easily compare with
     // ovl (which did not port sched())
-    if(debug['X'])
+    // claude: was gated on debug['X'] (Xix-compliant mode); now on
+    // optlevel via the new -O0 (see l.h/obj.c and
+    // docs/claude_notes/notes_frontend_optlevels.txt) instead, so this
+    // has the same "give me the least-optimized, most-comparable-to-
+    // ovl output" effect as before but through the standard flag.
+    if(optlevel < 1)
         return;
 
 	/*
@@ -90,7 +95,7 @@ sched(Prog *p0, Prog *pe)
 		for(t=s+1; t<=se; t++) {
 			if(!(t->p.mark & LOAD))
 				continue;
-			if(t->p.mark & BRANCH)
+			if(t->p.mark & BRANCH || t->set.ireg & (1<<REGSP))
 				break;
 			if(conflict(s, t))
 				break;
@@ -107,7 +112,7 @@ sched(Prog *p0, Prog *pe)
 
 		/* put schedule fodder above load */
 		for(t=s+1; t<=se; t++) {
-			if(t->p.mark & BRANCH)
+			if(t->p.mark & BRANCH || t->set.ireg & (1<<REGSP))
 				break;
 			if(s > sch && conflict(s-1, t))
 				continue;
@@ -346,6 +351,12 @@ regsused(Sch *s, Prog *realp)
 				print("botch %P\n", p);
 		}
 		break;
+
+	case ASC:
+	case ALL:
+		sz = 4;
+		ld = 1;
+		break;
 	}
 
 /*
@@ -521,6 +532,10 @@ regsused(Sch *s, Prog *realp)
 		s->used.ireg |= 1<<REGSB;
 		break;
 	case C_REG:
+		/* special case -- SC writes result to p->from.reg */
+		if(p->as == ASC)
+			s->set.ireg |= 1<<p->from.reg;
+
 		s->used.ireg |= 1<<p->from.reg;
 		break;
 	case C_FREG:
@@ -595,6 +610,15 @@ depend(Sch *sa, Sch *sb)
 		if(sa->p.reg == sb->p.reg)
 		if(regoff(&sa->p.from) == regoff(&sb->p.from))
 			return 1;
+
+	/*
+	 * special case
+	 * atomic instructions cannot pass.
+	 */
+	if(sa->p.as == ALL || sb->p.as == ALL)
+		return 1;
+	if(sa->p.as == ASC || sb->p.as == ASC)
+		return 1;
 
 	x = (sa->set.cc & (sb->set.cc|sb->used.cc)) |
 		(sb->set.cc & sa->used.cc);

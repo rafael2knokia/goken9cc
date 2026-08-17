@@ -2,6 +2,7 @@ TOP=../..
 <$TOP/mkfiles/$objtype/mkfile
 
 TARG=5a
+LDLIBS=-lbio $BOOTLIBS
 
 OFILES=globals.$O\
 	y.tab.$O\
@@ -9,20 +10,16 @@ OFILES=globals.$O\
 	obj.$O\
     main.$O\
 
-HFILES=\
-	y.tab.h\
-	a.h\
-    $TOP/include/ALL/5.out.h
+HFILES= y.tab.h	a.h $TOP/include/obj/5.out.h
 
 YFILES=a.y
 
-LIB=../aa/aa.a$O
+LIB=../as/aa.a$O
 
 <$TOP/mkfiles/mkone
 
 $LIB:
-	cd ../aa
+	cd ../as
 	mk all
 
 YFLAGS=-D1 -d
-

@@ -1,32 +1,26 @@
-#!/home/pad/goken/bin/rc
-# TODO: why this does not work?
-# #!/home/pad/goken/bin/rc -m /home/pad/goken/etc/rcmain.unix
+#!/home/pad/goken/bin/rc -m/home/pad/goken/etc/rcmain.unix
 
 # Script to compare the source code in the different kencc-derived
-# repositories, to ultimately try to unify them in one repo (goken).
-# ex of use: cd ~/; ./goken/diff.rc va &> /tmp/diffva
+# repositories to ultimately try to unify them in one repo (goken).
+# ex: cd ~/; ./goken/scripts/diff.rc va &> /tmp/diffva
 
 cmd=$1
 # let's focus just on the C and assembly code; let's skip diff on mkfile
 flags=(-u -p -b -B -r -x mkfile)
 
 # missing: 
-# - x9base: no compiler toolchain
-# - xplan9port: no compiler toolchain
-# - x9cc: no riscv (ia/ic/il), no 5i, no vi
-# - x9front: no riscv
+# - 9base: no compiler toolchain
+# - plan9port: no compiler toolchain
+# - 9cc: no riscv (ia/ic/il), no 5i/vi
+# - 9front: no riscv
 
-dirs1=(9cc 9colombier inferno mykencc kencc-riscv) # xinferno-old
-dirs2=(myplan9old plan9) 
-dirs3=(9base plan9port)
-dirs4=(goold goken)
-dirs5=() # myplan9  9front
-
-# big comparisons
+# default base, for big comparisons
 base=9cc
-#base=inferno # for ia/ic/il as x9cc does not have them
-#base=myplan9old
-dirs=($dirs1 $dirs2 $dirs3 $dirs4 $dirs5)
+#base=inferno # for ia/ic/il as 9cc does not have them
+
+dirs=(9cc 9colombier inferno inferno-old plan9 mykencc myplan9 kencc-riscv miller-riscv goken goold goken-go-variant 9front)
+# to add when comparing regular tools instead of the toolchain:
+#dirs=(9base plan9port)
 
 # goken comparisons
 #base=goken
@@ -34,8 +28,9 @@ dirs=($dirs1 $dirs2 $dirs3 $dirs4 $dirs5)
 
 # kencc comparisons
 #base=9cc
-#dirs=(9cc 9colombier inferno mykencc) # kencc-riscv
+#dirs=(9cc 9colombier inferno mykencc kencc-riscv)
 
+# other
 #base=mykencc
 #dirs=(9colombier)
 

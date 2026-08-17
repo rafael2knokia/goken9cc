@@ -35,9 +35,12 @@ rcmp(const void *a1, const void *a2)
 void
 regopt(Prog *p)
 {
+	static int maxregion;
+	static Rgn *region;
+	Rgn *rgp;
 	Reg *r, *r1, *r2;
 	Prog *p1;
-	int i, z;
+	int i, z, nregion;
 	int32 initpc, val, npc;
 	uint32 vreg;
 	Bits bit;
@@ -151,6 +154,7 @@ regopt(Prog *p)
 		case AMOVHU:
 		case AMOVW:
 		case AMOVWU:
+		case ASXTW:
 		case AFMOVS:
 		case AFCVTSD:
 		case AFMOVD:
@@ -316,8 +320,11 @@ loop2:
 
 	for(r = firstr; r != R; r = r->link)
 		r->act = zbits;
-	rgp = region;
 	nregion = 0;
+	if(region == nil) {
+		maxregion = 300;
+		region = alloc(maxregion * sizeof(Rgn));
+	}
 	for(r = firstr; r != R; r = r->link) {
 		for(z=0; z<BITS; z++)
 			bit.b[z] = r->set.b[z] &
@@ -333,6 +340,7 @@ loop2:
 			bit.b[z] = LOAD(r) & ~(r->act.b[z] | addrs.b[z]);
 		while(bany(&bit)) {
 			i = bnum(bit);
+			rgp = &region[nregion];
 			rgp->enter = r;
 			rgp->varno = i;
 			change = 0;
@@ -348,14 +356,12 @@ loop2:
 			}
 			rgp->cost = change;
 			nregion++;
-			if(nregion >= NRGN) {
-				warn(Z, "too many regions");
-				goto brk;
+			if(nregion >= maxregion) {
+				region = allocn(region, maxregion * sizeof(Rgn), 128*sizeof(Rgn));
+				maxregion += 128;
 			}
-			rgp++;
 		}
 	}
-brk:
 	qsort(region, nregion, sizeof(region[0]), rcmp);
 
 	/*
@@ -390,7 +396,7 @@ brk:
 	 * pass 7
 	 * peep-hole on basic block
 	 */
-	if(!debug['R'] || debug['P'])
+	if((optlevel >= 2 && !debug['R']) || debug['P'])	/* claude: -O (see cc.h/lex.c) */
 		peep();
 
 	/*
@@ -552,7 +558,7 @@ mkvar(Adr *a, int docon)
 {
 	Var *v;
 	int i, t, n, et, z;
-	int32 o;
+	vlong o;
 	Bits bit;
 	Sym *s;
 
@@ -567,7 +573,28 @@ mkvar(Adr *a, int docon)
 	if(s == S) {
 		if(t != D_CONST || !docon || a->reg != NREG)
 			goto none;
+		/* claude: naddr()'s OCONST case never sets a->etype (only
+		 * ONAME does), so `et = a->etype` above is reading
+		 * whatever was already in this Adr -- unreliable for a
+		 * bare constant, hence the explicit default below. But
+		 * TLONG (4 bytes) is only a safe default when the
+		 * constant's value actually fits in 4 bytes: `o` used to
+		 * be declared `int32`, silently truncating any 64-bit
+		 * constant assigned from a->offset (a vlong field) right
+		 * above, and every consumer of this Var's ->etype (e.g.
+		 * addmove(), deciding AMOV vs AMOVW when reloading a
+		 * registerized constant) trusted that truncated width --
+		 * so a plain `x = 0x0123456789ABCDEFULL;` got its high 32
+		 * bits silently dropped once the constant was registerized
+		 * across its two uses (compare against Results/regress or
+		 * see tests/c/regressions/arm64_uvlong_const_registerize.c
+		 * for an isolated repro). o is now the real vlong value, so
+		 * this checks whether it actually round-trips through a
+		 * 32-bit sign-extension before assuming TLONG is safe.
+		 */
 		et = TLONG;
+		if((vlong)(int32)o != o)
+			et = TVLONG;
 	}
 	if(t == D_CONST) {
 		if(s == S && sval(o))
@@ -584,7 +611,7 @@ mkvar(Adr *a, int docon)
 		v++;
 	}
 	if(s)
-		if(s->name[0] == '.')
+		if(s->name[0] == '.' && strcmp(s->name, ".ret") != 0)
 			goto none;
 	if(nvar >= NVAR) {
 		if(debug['w'] > 1 && s)

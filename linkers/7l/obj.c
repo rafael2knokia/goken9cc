@@ -1,7 +1,7 @@
 #define	EXTERN
 #include	"l.h"
 
-#include	<ar.h>
+#include	<obj/ar.h>
 
 char	thechar		= '7';
 char	*thestring 	= "arm64";
@@ -9,6 +9,7 @@ char	*thestring 	= "arm64";
 /*
  *	-H0				no header
  *	-H2 -T0x100028 -R0x100000		is plan9 format
+ *	-H6				is apple MACH (macOS arm64)
  *	-H7				is elf linux
  */
 
@@ -104,8 +105,9 @@ main(int argc, char *argv[])
         goos = getgoos();
 		if(goos != nil && strcmp(goos, "linux") == 0)
 			HEADTYPE = 7;
-		//if(strcmp(goos, "darwin") == 0)
-		//	HEADTYPE = 6;
+		else
+		if(goos != nil && strcmp(goos, "darwin") == 0)
+			HEADTYPE = 6;
 		//else
 		//if(strcmp(goos, "freebsd") == 0)
 		//	HEADTYPE = 9;
@@ -124,12 +126,35 @@ main(int argc, char *argv[])
 		break;
 	case 2:	/* plan 9 */
 		HEADR = 40L;
+		/* claude: was INITTEXT = 0x100000+HEADR, INITRND = 0x100000
+		 * (1MB). This 7l descends from Go's own arm64 linker port
+		 * (src/cmd/7l), not from 9front's native arm64 target -- see
+		 * "7a/7c/7l: revert go-era src/cmd adaptations, switch arm64
+		 * to iar" in git history. Real 9front's 7l (sys/src/cmd/7l/
+		 * obj.c) uses INITTEXT = 0x10000+HEADR and INITRND = 0x10000
+		 * (64K) for this same -H2 plan9 case -- 64K covers all three
+		 * ARM64 MMU translation granule sizes (4K/16K/64K), which is
+		 * presumably why 9front picked it. Nothing in this repo
+		 * currently links with -H2 on arm64 (principia-softwarica has
+		 * no arm64 kernel yet), so there's no existing boot layout
+		 * depending on the old 1MB round; matching 9front's actual
+		 * value here instead of Go's leftover one. */
 		if(INITTEXT == -1)
-			INITTEXT = 0x100000+HEADR;
+			INITTEXT = 0x10000+HEADR;
 		if(INITDAT == -1)
 			INITDAT = 0;
 		if(INITRND == -1)
-			INITRND = 0x100000;
+			INITRND = 0x10000;
+		break;
+	case 6:	/* apple MACH */ // macOS arm64
+		HEADR = MACHORESERVE;
+		if(INITTEXT == -1)
+			/* the __PAGEZERO segment covers [0, 4GB) on arm64 macOS */
+			INITTEXT = ((vlong)1<<32) + HEADR;
+		if(INITDAT == -1)
+			INITDAT = 0;
+		if(INITRND == -1)
+			INITRND = 0x4000; /* 16K pages on arm64, not 4K */
 		break;
 	case 7:	/* elf executable */ // Linux arm64
 		HEADR = rnd(Ehdr64sz+3*Phdr64sz, 16);
@@ -147,10 +172,10 @@ main(int argc, char *argv[])
 	if (INITTEXTP == -1)
 		INITTEXTP = INITTEXT;
 	if(INITDAT != 0 && INITRND != 0)
-		print("warning: -D0x%lux is ignored because of -R0x%lux\n",
+		print("warning: -D0x%llux is ignored because of -R0x%lux\n",
 			INITDAT, INITRND);
 	if(debug['v'])
-		Bprint(&bso, "HEADER = -H0x%d -T0x%lux -D0x%lux -R0x%lux\n",
+		Bprint(&bso, "HEADER = -H0x%d -T0x%llux -D0x%llux -R0x%lux\n",
 			HEADTYPE, INITTEXT, INITDAT, INITRND);
 	Bflush(&bso);
 	zprg.as = AGOK;
@@ -306,13 +331,13 @@ zaddr(uchar *p, Adr *a, Sym *h[])
 		break;
 
 	case D_SCONST:
-		a->sval = halloc(NSNAME);
+		a->sval = malloc(NSNAME);
 		memmove(a->sval, p+4, NSNAME);
 		c += NSNAME;
 		break;
 
 	case D_FCONST:
-		a->ieee = halloc(sizeof(Ieee));
+		a->ieee = malloc(sizeof(Ieee));
 		a->ieee->l = p[4] | (p[5]<<8) |
 			(p[6]<<16) | (p[7]<<24);
 		a->ieee->h = p[8] | (p[9]<<8) |
@@ -336,7 +361,7 @@ zaddr(uchar *p, Adr *a, Sym *h[])
 			return c;
 		}
 
-	u = halloc(sizeof(Auto));
+	u = malloc(sizeof(Auto));
 	u->link = curauto;
 	curauto = u;
 	u->asym = s;
@@ -375,7 +400,6 @@ ldobj(fdt f, int32 c, char *pn)
 	static int files;
 	static char **filen;
 	char **nfilen;
-    int hlen;
 
 	if((files&15) == 0){
 		nfilen = malloc((files+16)*sizeof(char*));
@@ -388,11 +412,6 @@ ldobj(fdt f, int32 c, char *pn)
 	bsize = buf.xbuf;
 	bloc = buf.xbuf;
 	di = S;
-
-    //coupling: 7a/lex.c and and 7c/swt.c
-    hlen = strlen("arm64\n\n!\n");
-    seek(f, hlen, SEEK__CUR);
-    c-=hlen;
 
 newloop:
 	memset(h, 0, sizeof(h));
@@ -476,7 +495,13 @@ loop:
 		goto loop;
 	}
 
-	p = halloc(sizeof(Prog));
+	/* claude: mallocz (zeroed), not plain malloc: only as/reg/line/from/
+	 * to (and, only when bloc[2]&0x40 is set, from3) are filled in
+	 * below -- mark is only conditionally set (bloc[2]&0x80), link/cond
+	 * are set further down, and forwd/pc/width/ft/tt are never touched
+	 * here at all. Same reasoning as 8l's own identical ldobj() fix
+	 * (linkers/8l/obj.c) and sub.c's own gethunk() removal comment. */
+	p = mallocz(sizeof(Prog), 1);
 	p->as = o;
 	p->reg = bloc[2] & 0x3F;
 	if(bloc[2] & 0x80)

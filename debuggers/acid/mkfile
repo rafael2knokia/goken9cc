@@ -1,9 +1,8 @@
 TOP=../..
-<$TOP/mkconfig
 <$TOP/mkfiles/$objtype/mkfile
 
 TARG=acid
-LDLIBS=-lmach_ -lbio -lregexp -l9 -lm
+LDLIBS=-lmach -lbio -lregexp $BOOTLIBS
 
 OFILES=	main.$O\
 	y.tab.$O\

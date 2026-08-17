@@ -1,0 +1,15 @@
+TOP=../..
+<$TOP/mkfiles/$objtype/mkfile
+
+TARG=el
+LDLIBS=-lbio $BOOTLIBS
+
+OFILES=\
+	main.$O\
+	obj.$O\
+	optab.$O\
+	asm.$O\
+
+HFILES=	l.h $TOP/include/obj/e.out.h
+
+<$TOP/mkfiles/mkone

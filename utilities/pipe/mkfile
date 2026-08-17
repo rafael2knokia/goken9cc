@@ -1,10 +1,9 @@
 TOP=../..
-<$TOP/mkconfig
 <$TOP/mkfiles/$objtype/mkfile
 
 # for mc to remove plan9 specific draw.h and rio/acme extensions
 CFLAGS_EXTRA=-DUnix
-LDLIBS=-lbio -l9 -lm
+LDLIBS=-lbio $BOOTLIBS
 
 TARG=xargs p mc tee tail
 

@@ -448,10 +448,47 @@ asmout(Prog *p, Optab *o)
 		if(s < 0)
 			diag("unexpected long move, op %A tab %A\n%P", p->as, o->as, p);
 		v = regoff(&p->to);
-		if(v < 0)
-			diag("negative large offset\n%P", p);
 		if((v & ((1<<s)-1)) != 0)
 			diag("misaligned offset\n%P", p);
+		/* claude: was missing this bailout entirely (compare 9front's
+		 * 7l/asmout.c case 30, which has the identical check) -- a
+		 * single ADD-immediate (imm12, optionally <<12) can only reach
+		 * ~16MB, so any L(R) whose *linked* offset lands past that
+		 * (e.g. any symbol placed after lib_core/libc/port/
+		 * minimal_malloc.c's 64MB heap[] in the data/bss segment --
+		 * genuinely possible for ANY small global, not just this one,
+		 * since dodata()'s placement order is hash-table-iteration-
+		 * order-dependent) silently wrapped through oaddi() with no
+		 * error at all. Route those through the (already-present but
+		 * dead, never reached until now) case 47 instead, same as
+		 * 9front. See tests/c/regressions/arm64_large_bss_sb_offset.c
+		 * and docs/claude_notes/notes_arch_arm64.txt.
+		 */
+		/* claude: was `(v>>s) >= (1<<24)` -- wrong, and not just for
+		 * the ORIGINAL misaligned-offset case this bailout's own
+		 * comment already covers. `hi` (below) is v with bits
+		 * [0,s+11] cleared -- i.e. v rounded down to a multiple of
+		 * 2^(s+12) -- and for hi to fit an ADD-immediate (imm12<<12,
+		 * max 0xFFF000 ~ 16MB) needs hi < 1<<24, which for a v with
+		 * any bit set at position >=24 is false REGARDLESS of s
+		 * (clearing only the low s+12 bits, s+12 <= 24 for every
+		 * scale this backend uses, never touches bit 24+). So the
+		 * real threshold is v >= 1<<24, not (v>>s) >= 1<<24 -- the
+		 * `>>s` let offsets up to 8x too large through for FMOVD
+		 * (s=3), which then failed *inside* oaddi() ("offset out of
+		 * range") instead of routing to the Hugestxr/case 47 fallback
+		 * below, exactly the failure mode the "was missing this
+		 * bailout entirely" fix (see that comment, same file) was
+		 * supposed to eliminate. Found self-hosting compilers/7c,
+		 * whose own fconstnode/pows10<> float constants land past
+		 * lib_core/libc's 64MB heap[] in the data segment -- verified
+		 * against 9front's sys/src/cmd/7l/asmout.c, which has the
+		 * exact same `>>s` bug (unexercised there, not confirmed
+		 * fixed upstream; not blindly matched here since the actual
+		 * ARM64 ADD-immediate encoding this depends on is independent
+		 * of 9front's own history). */
+		if(v < 0 || v >= (1<<24))
+			goto Hugestxr;
 		hi = v - (v & (0xFFF<<s));
 		if((hi & 0xFFF) != 0)
 			diag("internal: miscalculated offset %ld [%d]\n%P", v, s, p);
@@ -468,10 +505,12 @@ asmout(Prog *p, Optab *o)
 		if(s < 0)
 			diag("unexpected long move, op %A tab %A\n%P", p->as, o->as, p);
 		v = regoff(&p->from);
-		if(v < 0)
-			diag("negative large offset\n%P", p);
 		if((v & ((1<<s)-1)) != 0)
 			diag("misaligned offset\n%P", p);
+		/* claude: see case 30's comment above (both the original
+		 * bailout-was-missing fix and the `>>s` correction). */
+		if(v < 0 || v >= (1<<24))
+			goto Hugeldxr;
 		hi = v - (v & (0xFFF<<s));
 		if((hi & 0xFFF) != 0)
 			diag("internal: miscalculated offset %ld [%d]\n%P", v, s, p);
@@ -670,23 +709,36 @@ asmout(Prog *p, Optab *o)
 		break;
 
 	case 47:	/* movT R,V(R) -> strT (huge offset) */
-		o1 = omovlit(AMOVW, p, &p->to, REGTMP);
+	Hugestxr:
+		/* claude: was `omovlit(AMOVW, ...)` -- REGTMP holds the full
+		 * offset/address (up to 64 bits), not a 32-bit value; AMOVW
+		 * there silently built only the low 32 bits via omovlit()'s
+		 * own as-dependent width logic. Matches 9front's case 47/48
+		 * (AMOV, plus the REGTMP.SX bit on o2 below) -- this whole
+		 * case was already present but unreachable (case 30 never
+		 * branched here) and had this bug plus a stubbed-out
+		 * olsxrr(), so it was never actually exercised until now.
+		 */
+		o1 = omovlit(AMOV, p, &p->to, REGTMP);
 		if(!o1)
 			break;
 		r = p->to.reg;
 		if(r == NREG)
 			r = o->param;
-		o2 = olsxrr(p->as, REGTMP,r, p->from.reg);
+		o2 = LD2STR(olsxrr(p->as, REGTMP, r, p->from.reg));
+		o2 |= 7<<13;	// REGTMP.SX
 		break;
 
 	case 48:	/* movT V(R), R -> ldrT (huge offset) */
-		o1 = omovlit(AMOVW, p, &p->from, REGTMP);
+	Hugeldxr:
+		o1 = omovlit(AMOV, p, &p->from, REGTMP);
 		if(!o1)
 			break;
 		r = p->from.reg;
 		if(r == NREG)
 			r = o->param;
-		o2 = olsxrr(p->as, REGTMP,r, p->to.reg);
+		o2 = olsxrr(p->as, REGTMP, r, p->to.reg);
+		o2 |= 7<<13;	// REGTMP.SX
 		break;
 
 	case 50:	/* sys/sysl */
@@ -729,12 +781,53 @@ asmout(Prog *p, Optab *o)
 		o1 = opirr(as);
 		s = o1 & S64? 64: 32;
 		mask = findmask(p->from.offset);
-		if(mask == nil)
+		/* claude: the v|(v<<32) fallback (a value that's only a valid
+		 * *32-bit*-replicated bitmask pattern, not a genuine 64-bit
+		 * one) must not be used to encode a real 64-bit-width (s==64)
+		 * instruction -- the hardware would replicate the pattern
+		 * into the upper 32 bits too, corrupting them. Only correct
+		 * for s==32, where a 32-bit-width instruction never touches
+		 * the upper half regardless of what the mask "would" produce
+		 * there. See isbitcon() in span.c (used by aclass(), which
+		 * decides whether a Prog even reaches this case at all) for
+		 * the matching classification-time fix and the full writeup.
+		 */
+		if(mask == nil && s == 32)
 			mask = findmask(p->from.offset | (p->from.offset<<32));
 		if(mask != nil){
 			o1 |= ((mask->r&(s-1))<<16) | (((mask->s-1)&(s-1))<<10);
 			if(s == 64){
-				if(mask->e == 64 && ((uvlong)p->from.offset>>32) != 0)
+				/* claude: was `if(mask->e == 64 && ((uvlong)
+				 * p->from.offset>>32) != 0)` -- the extra
+				 * "upper 32 bits nonzero" check is a false
+				 * proxy for "does this genuinely need a
+				 * 64-bit-wide (N=1) encoding". findmask()
+				 * already determined that authoritatively via
+				 * mask->e (the element size the pattern
+				 * actually requires): a value like 0xFF (8
+				 * contiguous one-bits, all else zero) has
+				 * mask->e==64 -- it is NOT expressible as any
+				 * smaller repeating element, since a smaller
+				 * element would force the upper and lower
+				 * halves to match, which they don't (upper
+				 * half is all zero, lower half isn't) -- yet
+				 * its raw value has zero upper bits, so the
+				 * old check wrongly skipped setting N=1,
+				 * encoding it as N=0 (a repeating sub-64-bit
+				 * element) instead. The hardware then
+				 * replicated the low-byte pattern into the
+				 * upper 32 bits of the destination too,
+				 * silently corrupting them (confirmed via
+				 * tests/c/regressions/
+				 * arm64_bitcon_upper_bits.c: `uvlong v = ...;
+				 * v ^= 0xff;` corrupted a byte in the upper
+				 * 32 bits it should never have touched). The
+				 * condition needing checking is simply
+				 * "does the pattern need the full 64-bit
+				 * element", which is exactly mask->e==64,
+				 * with no additional caveat.
+				 */
+				if(mask->e == 64)
 					o1 |= 1<<22;
 			}else{
 				u = (uvlong)p->from.offset >> 32;
@@ -806,12 +899,12 @@ asmout(Prog *p, Optab *o)
 
 	case 59:	/* stxr */
 		o1 = opstore(p->as);
-		o1 |= p->reg << 16;
-		if(p->from3.type != D_NONE)
-			o1 |= p->from3.reg<<10;
-		else
-			o1 |= 0x1F<<10;
+		o1 |= 0x1F<<10;
 		o1 |= p->to.reg<<5;
+		if(p->reg != NREG)
+			o1 |= p->reg<<16;
+		else
+			o1 |= 0x1F<<16;
 		o1 |= p->from.reg;
 		break;
 
@@ -858,6 +951,18 @@ asmout(Prog *p, Optab *o)
 		if(!o1)
 			break;
 		o2 = olsr12u(opldr12(p->as), 0, REGTMP, p->to.reg);
+		break;
+
+	//NEW: for macOS PIE executables (see the C_ADDR cases in aclass())
+	case 66:	/* mov $addr(SB), R -> adrp + add (pc-relative) */
+		aclass(&p->from);
+		d = instoffset;
+		rt = p->to.reg;
+		v = (d >> 12) - (p->pc >> 12);	/* delta in 4K pages */
+		if(v < -(1<<20) || v >= (1<<20))
+			diag("adrp page displacement out of range\n%P", p);
+		o1 = (1u<<31) | (0x10<<24) | ((v&3)<<29) | (((v>>2)&0x7FFFF)<<5) | rt;
+		o2 = opirr(AADD) | ((d & 0xFFF)<<10) | (rt<<5) | rt;
 		break;
 	}
 
@@ -1424,20 +1529,25 @@ opload(int a)
 	switch(a){
 	case ALDAR:	return LDSTX(3,1,1,0,1) | 0x1F<<10;
 	case ALDARW:	return LDSTX(2,1,1,0,1) | 0x1F<<10;
-	case ALDARB:	return LDSTX(0,1,1,0,1) | 0x1F<<10;
 	case ALDARH:	return LDSTX(1,1,1,0,1) | 0x1F<<10;
+	case ALDARB:	return LDSTX(0,1,1,0,1) | 0x1F<<10;
+
 	case ALDAXP:	return LDSTX(3,0,1,1,1);
 	case ALDAXPW:	return LDSTX(2,0,1,1,1);
+
 	case ALDAXR:	return LDSTX(3,0,1,0,1) | 0x1F<<10;
-	case ALDAXRW:	return LDSTX(2,1,1,0,1) | 0x1F<<10;
-	case ALDAXRB:	return LDSTX(0,0,1,0,1) | 0x1F<<10;
+	case ALDAXRW:	return LDSTX(2,0,1,0,1) | 0x1F<<10;
 	case ALDAXRH:	return LDSTX(1,0,1,0,1) | 0x1F<<10;
-	case ALDXR:		return LDSTX(3,0,1,0,0) | 0x1F<<10;
-	case ALDXRB:		return LDSTX(0,0,1,0,0) | 0x1F<<10;
-	case ALDXRH:		return LDSTX(1,0,1,0,0) | 0x1F<<10;
-	case ALDXRW:		return LDSTX(2,0,1,0,0) | 0x1F<<10;
-	case ALDXP:		return LDSTX(3,0,1,1,0);
-	case ALDXPW:		return LDSTX(2,0,1,1,0);
+	case ALDAXRB:	return LDSTX(0,0,1,0,1) | 0x1F<<10;
+
+	case ALDXR:	return LDSTX(3,0,1,0,0) | 0x1F<<10;
+	case ALDXRW:	return LDSTX(2,0,1,0,0) | 0x1F<<10;
+	case ALDXRH:	return LDSTX(1,0,1,0,0) | 0x1F<<10;
+	case ALDXRB:	return LDSTX(0,0,1,0,0) | 0x1F<<10;
+
+	case ALDXP:	return LDSTX(3,0,1,1,0);
+	case ALDXPW:	return LDSTX(2,0,1,1,0);
+
 	case AMOVNP:	return S64 | 0<<30 | 5<<27 | 0<<26 | 0<<23 | 1<<22;
 	case AMOVNPW:	return S32 | 0<<30 | 5<<27 | 0<<26 | 0<<23 | 1<<22;
 	}
@@ -1450,23 +1560,26 @@ opstore(int a)
 {
 	switch(a){
 	case ASTLR:		return LDSTX(3,1,0,0,1) | 0x1F<<10;
-	case ASTLRB:		return LDSTX(0,1,0,0,1) | 0x1F<<10;
-	case ASTLRH:		return LDSTX(1,1,0,0,1) | 0x1F<<10;
-	case ASTLP:		return LDSTX(3,0,0,1,1);
-	case ASTLPW:		return LDSTX(2,0,0,1,1);
 	case ASTLRW:		return LDSTX(2,1,0,0,1) | 0x1F<<10;
-	case ASTLXP:		return LDSTX(2,0,0,1,1);
-	case ASTLXPW:		return LDSTX(3,0,0,1,1);
+	case ASTLRH:		return LDSTX(1,1,0,0,1) | 0x1F<<10;
+	case ASTLRB:		return LDSTX(0,1,0,0,1) | 0x1F<<10;
+
+	case ASTLXP:		return LDSTX(3,0,0,1,1);
+	case ASTLXPW:		return LDSTX(2,0,0,1,1);
+
 	case ASTLXR:		return LDSTX(3,0,0,0,1) | 0x1F<<10;
-	case ASTLXRB:		return LDSTX(0,0,0,0,1) | 0x1F<<10;
-	case ASTLXRH:		return LDSTX(1,0,0,0,1) | 0x1F<<10;
 	case ASTLXRW:		return LDSTX(2,0,0,0,1) | 0x1F<<10;
+	case ASTLXRH:		return LDSTX(1,0,0,0,1) | 0x1F<<10;
+	case ASTLXRB:		return LDSTX(0,0,0,0,1) | 0x1F<<10;
+
 	case ASTXR:		return LDSTX(3,0,0,0,0) | 0x1F<<10;
-	case ASTXRB:		return LDSTX(0,0,0,0,0) | 0x1F<<10;
+	case ASTXRW:		return LDSTX(2,0,0,0,0) | 0x1F<<10;
 	case ASTXRH:		return LDSTX(1,0,0,0,0) | 0x1F<<10;
+	case ASTXRB:		return LDSTX(0,0,0,0,0) | 0x1F<<10;
+
 	case ASTXP:		return LDSTX(3,0,0,1,0);
 	case ASTXPW:		return LDSTX(2,0,0,1,0);
-	case ASTXRW:		return LDSTX(2,0,0,0,0) | 0x1F<<10;
+
 	case AMOVNP:	return S64 | 0<<30 | 5<<27 | 0<<26 | 0<<23 | 1<<22;
 	case AMOVNPW:	return S32 | 0<<30 | 5<<27 | 0<<26 | 0<<23 | 1<<22;
 	}
@@ -1564,6 +1677,15 @@ opldrpp(int a)
 	case AMOVHU:	return 1<<30 | 7<<27 | 0<<26 | 0<<24 | 1<<22;
 	case AMOVB:	return 0<<30 | 7<<27 | 0<<26 | 0<<24 | 2<<22;
 	case AMOVBU:	return 0<<30 | 7<<27 | 0<<26 | 0<<24 | 1<<22;
+	/* claude: AFMOVS/AFMOVD -- same shape as AMOVW/AMOV just above
+	 * (same size field, bit 26 set instead of 0, the V bit selecting a
+	 * SIMD/FP register transfer instead of a general-purpose one),
+	 * ported from 9front's own opldrpp(), which already has both.
+	 * Needed once case 47/48 (this function's only caller) actually
+	 * got reached for an AFMOVD -- see asmout.c case 30's own comment
+	 * for how self-hosting compilers/7c surfaced that. */
+	case AFMOVS:	return 2<<30 | 7<<27 | 1<<26 | 0<<24 | 1<<22;
+	case AFMOVD:	return 3<<30 | 7<<27 | 1<<26 | 0<<24 | 1<<22;
 	}
 	diag("bad opldr %A\n%P", a, curp);
 	return 0;
@@ -1571,18 +1693,44 @@ opldrpp(int a)
 
 /*
  * load/store register (extended register)
+ * claude: ported from 9front's 7l/asmout.c (same function name/shape,
+ * builds on opldrpp()'s opcode template -- verified identical to
+ * 9front's for every AMOV/AMOVW/AMOVWU/AMOVH/AMOVHU/AMOVB/AMOVBU case,
+ * the only ones this project's case 47/48 callers use). Was a stub
+ * that always diag()'d; case 47/48 (the "huge SB-offset" fallback) were
+ * already written to call it but never reachable until case 30/31
+ * grew the magnitude check that jumps here -- see those cases' own
+ * comments and docs/claude_notes/notes_arch_arm64.txt.
  */
 static int32
 olsxrr(int a, int b, int c, int d)
 {
-	diag("need load/store extended register\n%P", curp);
-	return -1;
+	return opldrpp(a) | 1<<21 | b<<16 | 2<<10 | c<<5 | d;
 }
 
 static int32
 oaddi(int32 o1, int32 v, int r, int rt)
 {
-	if((v & 0xFFF000) != 0){
+	/* claude: was `if((v & 0xFFF000) != 0)` -- only tests bits [23:12],
+	 * so a value with nothing set in that window but bits set at 24+
+	 * (e.g. 0x4000000, a plain 64MB offset) reads as "fits in imm12
+	 * directly" and gets silently masked to its low 12 bits instead of
+	 * being shifted, dropping the high bits entirely with no error. Real
+	 * repro: a global BSS array >=16MB (lib_core/libc/port/
+	 * minimal_malloc.c's 64MB heap[]) pushes some *other* small static's
+	 * linked SB-offset past what a single ADD-immediate (imm12,
+	 * optionally <<12) can ever encode -- see asmout.c's case 30/31,
+	 * the actual caller for the SB-relative-load/store shape that hit
+	 * this, and tests/c/regressions/arm64_large_bss_sb_offset.c. Check
+	 * the full encodable range up front and diag() if `v` doesn't fit
+	 * either form, rather than silently emitting a wrong-but-valid
+	 * instruction.
+	 */
+	if(v < 0 || v > 0xFFF000)
+		diag("oaddi: offset out of range for ADD/SUB immediate: %#lux\n%P", v, curp);
+	if(v > 0xFFF){
+		if((v & 0xFFF) != 0)
+			diag("oaddi: offset needs both direct and shifted immediate bits: %#lux\n%P", v, curp);
 		v >>= 12;
 		o1 |= 1<<22;
 	}

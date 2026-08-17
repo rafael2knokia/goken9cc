@@ -1,0 +1,6 @@
+TOP=../..
+
+test:V:
+	@{cd $TOP/machines/vi; mk}
+	@{cd ../s/mini; mk hello_plan9_mips.exe}
+	VI=$TOP/machines/vi/o.out bash smoke.sh

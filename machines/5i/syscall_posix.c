@@ -11,8 +11,15 @@
 char 	errbuf[ERRMAX];
 ulong	nofunc;
 
-//#include "../../lib_core/libc/9syscall/sys.h"
-#include "sys.h"
+// claude: sys.h moved here (lib_core/libc/syscall/os/plan9/, matching
+// the syscall/os/$OS/ layout linux/darwin already use) while wiring up
+// real Plan9 file syscalls in lib_core/libc -- this used to be
+// machines/5i/sys.h. Its own syncweb chunk marker still says
+// "lib_core/libc/9syscall/sys.h" (an earlier, different intended path)
+// -- left as-is per this project's own "never modify s:/e: markers"
+// rule, so the path in that comment and the file's real location no
+// longer match; that's expected, not a bug.
+#include "../../lib_core/libc/syscall/os/plan9/sys.h"
 
 char*	sysctab[] =
 {
@@ -258,6 +265,15 @@ sysread(vlong offset)
                 break;
         }
     }
+    // claude: a real Plan9 kernel treats a PREAD offset of ~0 (-1) as
+    // "current file position" (see principia-softwarica's own
+    // kernel/files/sysfile.c syspread(): `if(v == ~0ULL) return
+    // read(arg, nil);`), and this emulator stands in for that kernel
+    // -- but POSIX's own pread(2) has no such convention, a negative
+    // offset there is just EINVAL. Forward to the host's plain read(2)
+    // in that case instead.
+    else if(offset == -1)
+        n = read(fd, buf, size);
     else
         n = pread(fd, buf, size, offset);
 
@@ -289,7 +305,26 @@ sysseek(void)
 
     retp = getmem_w(reg.r[REGSP]+4);
     fd = getmem_w(reg.r[REGSP]+8);
-    v = getmem_v(reg.r[REGSP]+16);
+    /* claude: +12, not +16. The kernel's own sseek() (principia's
+     * kernel/files/sysfile.c) reads the offset as arg[2]/arg[3] -- the
+     * low and high words -- with arg[] based at SP+4, so the vlong sits
+     * at SP+12 and whence at SP+20. 5c agrees: for seek(fd, 6, 0) it
+     * emits "MOVW R3,12(R13)" (=6) and "MOVW R4,16(R13)" (=0) for the
+     * two halves, then whence at 20(R13). Reading the vlong from +16
+     * instead picked up (whence<<32)|offset_high, so seek(fd, 6, 0)
+     * silently seeked to 0 and seek(fd, 3, SEEK_CUR) to 1<<32.
+     *
+     * machines/vi/syscall.c's sysseek() already had +12; only this arm
+     * copy was wrong, so vi was the in-tree reference that settled it.
+     * Note principia's own machine/5i/syscall.c carries the same +16 --
+     * a real divergence from its kernel, not something to sync back.
+     *
+     * Invisible until tests/c/hello_libc/io.c started checking seek's
+     * RETURN VALUE with a nonzero offset: every previous seek in this
+     * tree was seek(fd, 0, 0), where all the misread slots are zero
+     * anyway. See docs/claude_notes/notes_abi_plan9.txt.
+     */
+    v = getmem_v(reg.r[REGSP]+12);
     mode = getmem_w(reg.r[REGSP]+20);
     if(sysdbg)
         itrace("seek(%d, %lld, %d)", fd, v, mode);
@@ -335,13 +370,25 @@ sysstat(void)
         itrace("stat(0x%lux='%s', 0x%lux, 0x%lux)", name, nambuf, edir, n);
     if(n > sizeof buf)
         errstr(errbuf, sizeof errbuf);
-    else{	
+    else{
         //n = stat(nambuf, buf, n);
         //if(n < 0)
         //    errstr(errbuf, sizeof errbuf);
         //else
         //    memio((char*)buf, edir, n, MemWrite);
-        Bprint(bout, "TODO stat() system call %s\n", sysctab[reg.r[REGARG]]);
+        /* claude: NOT sysctab[reg.r[REGARG]] here -- REGARG and REGRET
+         * are the same register (arm.h: both 0), and this function's
+         * own "reg.r[REGRET] = n" below (or sysfstat's earlier
+         * "reg.r[REGRET] = -1") can run before this line depending on
+         * control flow, silently turning the syscall-number index into
+         * whatever the last return value was -- e.g. -1, read as an
+         * unsigned array index, segfaulting on a wild sysctab[] read.
+         * Found via real execution (Tier 3's dirfstat()/dirfwstat(),
+         * docs/claude_notes/plan_syscalls.txt) crashing 5i outright the
+         * first time anything called STAT/FSTAT under it -- this TODO
+         * path is otherwise never exercised.
+         */
+        Bprint(bout, "TODO stat() system call\n");
         exits(0);
     }
     reg.r[REGRET] = n;
@@ -371,7 +418,13 @@ sysfstat(void)
     //else
     //    memio((char*)buf, edir, n, MemWrite);
     //reg.r[REGRET] = n;
-    Bprint(bout, "TODO fstat() system call %s\n", sysctab[reg.r[REGARG]]);
+    /* claude: not sysctab[reg.r[REGARG]] -- see sysstat()'s identical
+     * comment just above. Here it's not hypothetical: this function's
+     * own "reg.r[REGRET] = -1" a few lines up already clobbered
+     * reg.r[REGARG] (same register) by the time this line runs, so the
+     * old form always indexed sysctab[0xffffffff] and crashed.
+     */
+    Bprint(bout, "TODO fstat() system call\n");
     exits(0);
 
 }
@@ -390,9 +443,27 @@ syswrite(vlong offset)
 
     Bflush(bout);
     buf = memio(0, a, size, MemRead);
-    n = pwrite(fd, buf, size, offset);
+    // claude: fd 0/1/2 are shared with the debugger's own stdin/stdout
+    // (bin/bout) and are typically pipes or ttys on the host, not
+    // seekable regular files -- forwarding the emulated program's
+    // pwrite offset straight into the host's real pwrite(2) either
+    // fails outright (ESPIPE on a pipe, silently dropping the write
+    // since we only report the error via errstr) or corrupts output
+    // ordering (a positioned write on a regular file racing against
+    // bout's own sequential writes to the same fd). Use a plain
+    // sequential write for the standard streams instead.
+    //
+    // claude: also offset==-1 -- same "current position" real-kernel
+    // convention as sysread() above (principia's syspwrite() has the
+    // identical `if(v == ~0ULL) return write(arg, nil);`), needed for
+    // PWRITE on any *other* fd too, or a real pwrite(2) rejects it
+    // with EINVAL.
+    if(fd == 0 || fd == 1 || fd == 2 || offset == -1)
+        n = write(fd, buf, size);
+    else
+        n = pwrite(fd, buf, size, offset);
     if(n < 0)
-        errstr(errbuf, sizeof errbuf);	
+        errstr(errbuf, sizeof errbuf);
 
     if(sysdbg)
         itrace("write(%d, %lux, %d, 0x%llx) = %d", fd, a, size, offset, n);

@@ -1,9 +1,9 @@
 TOP=../..
-<$TOP/mkconfig
 <$TOP/mkfiles/$objtype/mkfile
 
 TARG=mtime_float
-LDLIBS=-l9 -lm
+# claude: no LDLIBS=$BOOTLIBS here -- see utilities/time/mkfile's
+# identical comment (mkfiles/mkone now appends $BOOTLIBS directly).
 
 OFILES=mtime_float.$O
 

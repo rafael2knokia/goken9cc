@@ -2,8 +2,7 @@
  * mipsim.h
  */
 
-//#include "../../include/arch/mips/ureg.h"
-#include <ureg_mips.h>
+#include <arch/mips/ureg.h>
 
 #define	USERADDR	0xC0000000
 #define	UREGADDR	(USERADDR+BY2PG-4-0xA0)
@@ -86,9 +85,28 @@ struct Inst
 struct Registers
 {
 	ulong	pc;
-	ulong	ir;
+	// claude: u32int, not ulong -- a MIPS instruction word is always
+	// 32 bits; ulong is 64 bits on this host, and "itab[(ir)>>26]" in
+	// Iexec() has no re-masking, so a sign-extended ir sends the
+	// dispatch to a wild out-of-bounds itab index (see ifetch()/
+	// getmem_w() in mem.c for where the sign-extension itself happens)
+	u32int	ir;
 	Inst	*ip;
-	long	r[32];
+	// claude: int32, not long -- same "code assumed a 32-bit host"
+	// bug as reg.ir above, but hitting signed comparisons instead of
+	// instruction dispatch: a MIPS register is 32 bits, and loads
+	// like Ilw() assign a u32int (getmem_w()'s return type) into this
+	// field, which zero-extends into a 64-bit `long` instead of
+	// sign-extending -- so a loaded word like 0xfffffffe (meant to be
+	// -2) read back as a huge *positive* 64-bit value, making Sslt()'s
+	// plain `<` comparison (and any other signed op relying on this
+	// field's own sign) wrong. Ssltu()'s existing explicit
+	// `(unsigned)reg.r[rs]` cast for the *unsigned* comparison is the
+	// tell that this field was always meant to be exactly 32 bits
+	// wide, signed by default, with unsigned ops opting in via a cast
+	// -- not a 64-bit field holding an unspecified mix of sign- and
+	// zero-extended values.
+	int32	r[32];
 	ulong	mhi;
 	ulong	mlo;
 
@@ -168,13 +186,15 @@ void		itrace(char *, ...);
 void		segsum(void);
 void		Ssyscall(ulong);
 char*		memio(char*, ulong, int, int);
-ulong		ifetch(ulong);
-ulong		getmem_w(ulong);
+u32int		ifetch(ulong);
+u32int		getmem_w(ulong);
+uvlong		getmem_v(ulong);
 ushort		getmem_h(ulong);
 void		putmem_w(ulong, ulong);
+void		putmem_v(ulong, uvlong);
 uchar		getmem_b(ulong);
 void		putmem_b(ulong, uchar);
-ulong		getmem_4(ulong);
+u32int		getmem_4(ulong);
 ulong		getmem_2(ulong);
 void		putmem_h(ulong, short);
 Mul		mul(long, long);

@@ -1,0 +1,130 @@
+Building goken itself on Windows (the host, not the target)
+==============================================================
+
+Scope: this file would be about compiling and running goken's own C
+sources *on* Windows as the development host, the same way
+docs/claude_notes/notes_os_macos.txt covers the macOS-as-host story.
+For Windows as a *target* (PE output via 6l/8l -H10, the import-table
+mechanism, wine/native testing), see
+docs/claude_notes/notes_exec_pe.txt instead -- that file already
+covers wine and native `mk test_windows` execution of the *produced*
+binaries, which is a different concern from building the toolchain
+itself on a Windows machine.
+
+Current state: WSL/Cygwin only, nothing native yet
+---------------------------------------------------------
+
+Per README.md and changes.txt, goken currently builds on Windows only
+via Windows Subsystem for Linux (WSL) or Cygwin -- i.e., by way of a
+POSIX-compatible layer, not against native Windows toolchains (MSVC,
+or clang/mingw invoked directly from a native shell). Both of those
+compatibility layers make the host look enough like Linux that little
+Windows-specific host-build content has accumulated -- but see below
+for two bugs Cygwin *did* surface, both from 2026-07-27.
+
+Bug: GOOS=cygwin leaks from host config into target auto-detection
+--------------------------------------------------------------------
+
+`./configure` (commit 7e34006cf, 2026-07-22) sets `GOOS=cygwin` in
+`mkconfig` to record the *host* build platform, needed so the rest of
+configure/mkfiles can key Cygwin-specific bootstrap decisions off it.
+But `mk` puts every mk variable into the environment of each recipe's
+shell, so this same `GOOS=cygwin` leaks into any linker invocation
+that doesn't pass `-H` explicitly. The go-era linkers (`src/cmd/{5,6,8}l`
+built as `5lg`/`6lg`/`8lg`) fall back to auto-detecting HEADTYPE from
+`$GOOS` when `-H` is absent (see `src/cmd/6l/obj.c:138-153`, matching
+only linux/darwin/freebsd/windows), so on a Cygwin host they printed
+"goos is not known: cygwin" and silently defaulted to the wrong
+(Plan 9) header instead of ELF Linux. This only worked "by accident"
+on Linux/macOS hosts, where host GOOS happened to equal the target.
+
+Hit via `tests/s/mini/mkfile`'s three `_`-suffixed recipes
+(`hello_linux_{386,amd64,arm}_.exe`), the only ones in that file
+relying on the auto-detect fallback instead of passing `-H` like
+every sibling recipe. Fixed by adding `-H7` to those three recipes
+(commit 1d59f803f) rather than touching the more invasive
+host-vs-target GOOS plumbing. Any *other* recipe anywhere in the tree
+that omits `-H` on a go-era linker and runs on a Cygwin host is
+exposed to the same failure mode -- worth grepping for if new ones
+turn up.
+
+Bug: gethunk()'s malloc() doesn't zero memory, unlike the sbrk() it replaced
+------------------------------------------------------------------------------
+
+Several `gethunk()` implementations across the tree were switched from
+`sbrk()` to `malloc()` to fix a different, unrelated macOS/arm64 sbrk
+cap issue (see the "claude:" comments at each site). That swap is only
+safe if the caller re-zeroes the chunk: the whole hunk-allocator
+convention (`alloc()`/`lookup()` in `compilers/cck/lexbody`, and
+equivalents elsewhere) relies on freshly carved-out structs having
+all-zero fields except the ones explicitly set -- e.g. `lookup()`
+allocates a new `Sym` and only sets `name`/`link`/`type`/`value`,
+leaving `macro`/`sym` at their assumed-zero default. `sbrk()` gave
+that for free (fresh kernel pages are zero-filled); `malloc()` does
+not promise it.
+
+`compilers/cc/utils.c` and `linkers/5lk/obj.c` already carried the
+fix (`memset(h, 0, nh)` right after the `malloc()`), but
+`compilers/cck/macbody` -- the `gethunk()` shared via `#include
+"../../compilers/cck/macbody"` by `assemblers/{va,ia,7a,6a,8ak,5ak}`
+-- had been missed. On Linux this went unnoticed because glibc's
+first few heap allocations in a short-lived process are often
+already-zero mmap'd pages, masking the missing memset; Cygwin's
+allocator does not give that same accidental cover. Surfaced as `va`
+(the mips assembler) segfaulting in `macexpand()` on any source file
+with two or more distinct new symbols (`TEXT`/`GLOBL` names) --
+reproduced down to a 2-line `GLOBL a(SB), $4 / GLOBL b(SB), $4` file,
+confirmed via Cygwin's `strace` + `addr2line` pointing at
+`compilers/cck/macbody:374`'s `*s->macro` dereference, where `s->macro`
+held leftover heap garbage instead of NULL for the second symbol.
+Fixed by adding the same `memset(h, 0, nh)` to that shared
+`gethunk()`. Verified by rebuilding `va` alone (`mk install` in
+`assemblers/va`) and rerunning `mk` in `tests/s/mini`, which now
+completes with exit 0 including `hello_linux_mips.exe` and
+`hello_plan9_mips.exe`.
+
+What would actually belong here
+-------------------------------------
+
+If a genuinely native Windows build is attempted (no WSL/Cygwin,
+compiling this tree's C sources with MSVC or a native-Windows
+clang/mingw), record what breaks and why here: things like path
+separator handling, case-insensitive filesystem surprises, missing
+POSIX headers/functions this codebase assumes (fork/exec, signals,
+mmap -- all things Plan 9 C code leans on heavily), or MSVC-specific C
+dialect gaps (this codebase is largely C89/C99 with some GNU
+extensions). None of that exists yet -- this file is a placeholder for
+when it does, per this project's own "not with Windows native
+compilers yet" TODO.
+
+The windows build is not exercised by anything on a Linux host
+------------------------------------------------------------------
+
+Worth stating explicitly, because it let a build-breaking error sit
+undetected: `mk test_windows` needs a real Windows host, so on the Linux
+dev box and in CI nothing ever compiles lib_core/libc with GOOS=windows.
+`mk test` passing says nothing whatsoever about this port.
+
+Concretely, os/windows/winio_amd64.s did not assemble AT ALL between the
+create()/DMDIR work and the sbrk work: _winopendir referenced
+$GENERIC_READ, but that constant is #defined in os/windows/open.c, a C
+file, which says nothing about the assembly one. 6a failed with
+"syntax error, last name: GENERIC_READ". Found only because adding
+_winalloc (for sbrk) meant assembling the file again.
+
+Two habits that follow:
+
+- After touching anything under os/windows/, at minimum cross-build it
+  on the Linux host, which does work and would have caught this:
+    cd lib_core/libc && rm -f libc.a && mk -a objtype=amd64 \
+      cputype=amd64 GOOS=windows OSEXTRAFILES=os/windows/winio_amd64.6 \
+      SYSCALLOFILES= install
+  then link the tests/c/hello_libc windows binaries. Linking is a real
+  check here, not a formality: it is what catches a missing
+  linkers/lk/pe.c importfuncs[] entry ("__imp_X: not defined").
+- Remember that a constant shared between os/windows/open.c and
+  winio_amd64.s has to be defined TWICE, once per language. There is no
+  shared header between them, deliberately (the .s is preprocessed by
+  the assembler, not the C compiler), so the duplication is by design --
+  but it means adding a Win32 flag in one file and using it in the other
+  fails, and fails at assembly time rather than anywhere informative.

@@ -1,0 +1,138 @@
+TOP=../..
+<$TOP/mkfiles/$objtype/mkfile
+
+LIBNAME=lib9.a
+
+# note that the -DPLAN9PORT is used only for fmt/
+CFLAGS_EXTRA=-DPLAN9PORT
+
+NUM=\
+	fmt/charstod.$O\
+	fmt/pow10.$O\
+
+# Could add fmt/errfmt, but we want to pick it up from ./errstr.c instead.
+# pad: adjusted fmtlock2.c instead of fmt/fmtlock.c because ??
+FMTOFILES=\
+	fmt/dofmt.$O\
+	fmt/fltfmt.$O\
+	fmt/fmt.$O\
+	fmt/fmtfd.$O\
+	fmt/fmtfdflush.$O\
+	fmt/fmtlocale.$O\
+	fmtlock2.$O\
+	fmt/fmtnull.$O\
+	fmt/fmtprint.$O\
+	fmt/fmtquote.$O\
+	fmt/fmtrune.$O\
+	fmt/fmtstr.$O\
+	fmt/fmtvprint.$O\
+	fmt/fprint.$O\
+	fmt/nan64.$O\
+	fmt/print.$O\
+	fmt/seprint.$O\
+	fmt/smprint.$O\
+	fmt/snprint.$O\
+	fmt/sprint.$O\
+	fmt/strtod.$O\
+	fmt/vfprint.$O\
+	fmt/vseprint.$O\
+	fmt/vsmprint.$O\
+	fmt/vsnprint.$O\
+	$NUM\
+
+UTFOFILES=\
+	utf/rune.$O\
+	utf/utfecpy.$O\
+	utf/utflen.$O\
+	utf/utfnlen.$O\
+	utf/utfrrune.$O\
+	utf/utfrune.$O\
+	utf/utfutf.$O\
+	utf/runetype.$O\
+        \
+	utf/runestrlen.$O\
+	utf/runestrchr.$O\
+
+#coupling: if you add a file here, you need to modify scripts/build-mk.sh too
+# as well as ./Makefile
+#TODO: fork.$O is not here why? 
+LIB9OFILES=\
+	_p9dir.$O\
+	_exits.$O\
+	argv0.$O\
+	atoi.$O\
+	cleanname.$O\
+	dirfstat.$O\
+	dirfwstat.$O\
+        fileexists.$O\
+	dirstat.$O\
+	dirwstat.$O\
+	dup.$O\
+	errstr.$O\
+	exec.$O\
+	execl.$O\
+	exitcode.$O\
+	exits.$O\
+	getenv.$O\
+	getfields.$O\
+	getwd.$O\
+	goos.$O\
+	main.$O\
+	math/nan.$O\
+	nulldir.$O\
+	open.$O\
+	readn.$O\
+	seek.$O\
+	strecpy.$O\
+	sysfatal.$O\
+	time.$O\
+	tokenize.$O\
+	await.$O\
+	getuser.$O\
+	jmp.$O\
+	notify.$O\
+	rfork.$O\
+        \
+        math/lnrand.$O\
+        math/lrand.$O\
+        zoneinfo.$O\
+        ctime.$O\
+        mallocz.$O\
+        cistrcmp.$O\
+        lock.$O\
+        tm2sec.$O\
+        atnotify.$O\
+        sleep.$O\
+        \
+        get9root.$O\
+        unsharp.$O\
+
+#ifeq ($(GOOS),windows)
+#LIB9OFILES+=\
+#	win32.$O\
+#else
+#LIB9OFILES+=\
+#	await.$O\
+#	getuser.$O\
+#	jmp.$O\
+#	notify.$O\
+#	rfork.$O\
+#endif
+
+OFILES=\
+	$LIB9OFILES\
+	$FMTOFILES\
+	$UTFOFILES\
+
+HFILES= $TOP/BOOT/include/u.h $TOP/BOOT/include/libc.h
+
+<$TOP/mkfiles/mksyslib
+
+ROOTDIR=`{cd $TOP/ROOT; pwd}
+
+#bugfix: do not use $preqeq below because then HFILES are also passed
+goos.$O: goos.c
+	$CC $CFLAGS $CFLAGS_EXTRA '-DGOOS='"$ostype" '-DGOARCH='"$cputype" '-DGOROOT='"$ROOTDIR" '-DGOVERSION='"goken" goos.c
+
+get9root.$O: get9root.c
+	$CC $CFLAGS $CFLAGS_EXTRA '-DGOROOT='"$ROOTDIR" get9root.c

@@ -1,9 +1,8 @@
 TOP=../..
-<$TOP/mkconfig
 <$TOP/mkfiles/$objtype/mkfile
 
-TARG=5c
-LDLIBS=-lbio -l9 -lm
+TARG=5ck
+LDLIBS=-lbio $BOOTLIBS
 
 OFILES=\
 	cgen.$O\
@@ -20,11 +19,11 @@ OFILES=\
         \
 	$TOP/linkers/5lk/enam.$O\
 
-HFILES=	gc.h $TOP/linkers/5lk/5.out.h $TOP/compilers/cc/cc.h
+HFILES=	gc.h $TOP/linkers/5lk/5.out.h $TOP/compilers/cck/cc.h
 
-LIB= $TOP/compilers/cc/cc.a
+LIB= $TOP/compilers/cck/cc.a$O
 
 <$TOP/mkfiles/mkone
 
-p%.$O: $TOP/compilers/cc/p%.c
-	$CC $CFLAGS $TOP/compilers/cc/p$stem.c
+p%.$O: $TOP/compilers/cck/p%.c
+	$CC $CFLAGS $TOP/compilers/cck/p$stem.c

@@ -1,0 +1,83 @@
+// Declarative syscall spec for linux/riscv (rv32), in the spirit of
+// GO/pkg/syscall's "//sys name(args) (ret) = SYS_NAME" comments (see
+// GO/pkg/syscall/syscall_linux.go), parsed by scripts/mksyscall.sh into
+// zsyscall_linux_riscv.c. Every wrapper just calls the one generic
+// _syscall6 trampoline (lib_core/libc/syscall/os/linux/svc_riscv.s), so
+// adding a syscall here is the only step needed -- no new assembly.
+
+//sys write(int fd, void *buf, long n) long = SYS_write
+//sys read(int fd, void *buf, long n) long = SYS_read
+//sys close(int fd) int = SYS_close
+// NOT lseek: syscall 62 is llseek on this 32-bit arch (see
+// numbers_riscv.h), a different call with a different shape. The raw
+// 5-arg form is generated here and syscall_linux_riscv.h adds the
+// lseek(fd, offset, whence) shim on top -- the same raw-plus-shim split
+// as _sysopen()/openat() below.
+//sys _sysllseek(int fd, ulong offhi, ulong offlo, vlong *result, int whence) int = SYS_llseek
+// no legacy SYS_open on this arch -- see syscall_linux_arm64.decl's
+// identical comment; syscall_linux_riscv.h adds the _sysopen() shim.
+//sys openat(int dirfd, void *path, int flags, int mode) long = SYS_openat
+// see syscall_linux_arm64.decl's identical comment -- same "generic"
+// ABI, so _sysunlink/_sysrmdir/_sysmkdir are shims over these two in
+// syscall_linux_riscv.h, while chdir needs nothing. All three numbers
+// are "common" in scripts/syscall.tbl, i.e. genuinely shared with rv64,
+// unlike syscall 62 above (llseek here, lseek on rv64 -- see
+// numbers_riscv.h).
+//sys unlinkat(int dirfd, char *path, int flags) int = SYS_unlinkat
+//sys mkdirat(int dirfd, char *path, int mode) int = SYS_mkdirat
+// access/dup: this ABI kept dup but replaced dup2 with dup3 and access
+// with faccessat, so syscall_linux_arm64.h shims access() and
+// _sysdup2() over them -- see syscall_linux_386.decl for why Plan9's
+// dup(oldfd, newfd) needs both dup forms in the first place.
+//sys faccessat(int dirfd, char *path, int mode, int flags) int = SYS_faccessat
+//sys _sysdup(int fd) int = SYS_dup
+//sys dup3(int oldfd, int newfd, int flags) int = SYS_dup3
+//sys chdir(char *path) int = SYS_chdir
+//sys exit(int code) void = SYS_exit
+// brk: the raw kernel primitive, _sys-prefixed like the others because
+// its shape is NOT the public one. Linux's brk(2) returns the NEW break
+// and reports failure by returning the UNCHANGED old one -- no errno at
+// all -- whereas include/os/mem.h's brk() is Plan9-shaped (0/-1).
+// os/linux/brk.c bridges the two, and port/sbrk.c sits on top of that.
+// rettype uintptr, not long: on the 64-bit archs a `long` is only 4
+// bytes here (see syscall_linux_amd64.h) and would truncate the
+// returned address; uintptr is pointer-wide on every arch by
+// definition, so all seven decls can say the same thing.
+//sys _sysbrk(void *addr) uintptr = SYS_brk
+// the "small tier": getpid, getwd, time/nsec, sleep.
+// getpid is the only one generated straight into its public name -- it
+// takes nothing, returns an int, and Plan9 and POSIX agree exactly.
+//sys getpid(void) int = SYS_getpid
+// getcwd is _sys-prefixed because the shapes differ twice over: POSIX
+// returns the LENGTH written (or -errno), Plan9's getwd() returns the
+// buffer (or nil). os/linux/getwd.c bridges it.
+//sys _sysgetcwd(char *buf, ulong size) long = SYS_getcwd
+// clock_gettime/clock_nanosleep rather than gettimeofday/nanosleep, and
+// on the 32-bit arches these numbers are the *_time64 variants -- see
+// numbers_$cputype.h for why (the timespec is 8+8 on every arch this
+// way, so os/linux/time.c needs no per-arch layout). The timespec is
+// passed as void* here for the same reason _sysopen takes void*: the
+// raw layer stays free of struct definitions, and os/linux/time.c
+// declares the one shape it needs.
+//sys _sysclockgettime(int clockid, void *ts) int = SYS_clock_gettime
+//sys _sysclocknanosleep(int clockid, int flags, void *req, void *rem) int = SYS_clock_nanosleep
+
+// Tier 6 notification -- see syscall_linux_amd64.decl's identical
+// comment. Unlike Tier 4's fork/wait4 (this file has no _sysfork/
+// _syswait4 lines above, that whole tier deferred for rv32 -- see
+// numbers_riscv.h's own comment), kill/rt_sigaction need no riscv32
+// carve-out at all.
+//sys _syskill(int pid, int sig) int = SYS_kill
+//sys _sysrtsigaction(int sig, void *act, void *oact, long sigsetsize) int = SYS_rt_sigaction
+
+// rc self-hosting's Isatty() (os/linux/isatty.c). arg stays void*
+// like _sysrtsigaction's act/oact above -- the raw layer stays free
+// of struct definitions, os/linux/isatty.c is the one place that
+// knows it points at a struct termios it never even reads (only
+// checks the ioctl's own success/failure).
+//sys _sysioctl(int fd, ulong request, void *arg) int = SYS_ioctl
+
+// alarm() (os/linux/alarm.c). new/old stay void* like every other raw
+// stub here -- the raw layer stays free of struct definitions, and
+// os/linux/alarm.c declares the one itimerval shape it needs.
+//sys _syssetitimer(int which, void *new, void *old) int = SYS_setitimer

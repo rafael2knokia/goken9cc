@@ -27,8 +27,24 @@ ginit(void)
 	lastp = P;
 	tfield = types[TLONG];
 
-	//TODO: typeswitch = typechlv;
-    //  need also restore in cc.h and use in pgen.c, see 9-cc code
+	/* claude: was commented out with a stale "need restore in cc.h"
+	 * TODO -- typechlv (cc.h/sub.c) is already a real, populated array
+	 * (7c's own machcap.c already reads it in three places), nothing
+	 * to restore. 6c's and 8c's own txt.c already have this exact line
+	 * uncommented, and 9front's 7c/txt.c has it too -- found self-
+	 * hosting compilers/7c via goken's own toolchain for the first
+	 * time, which hit exactly the gap this fixes: a switch() on a
+	 * vlong-typed expression (compilers/cck/pgen.c's OSWITCH case)
+	 * rejected as "switch expression must be integer" because
+	 * typeswitch was still pointing at typechl (char/short/long only,
+	 * no vlong), the default sub.c sets it to. NOT pairing this with
+	 * 9front's own `newvlongcode = 1` on the line above (still
+	 * commented) -- unlike typeswitch=typechlv, no other arch in this
+	 * tree enables newvlongcode anywhere, including 6c despite also
+	 * being a natively-64-bit target, so there is no existing proof in
+	 * THIS fork that flipping it on is safe; left as a separate,
+	 * unevaluated TODO rather than bundled in on 9front's say-so alone. */
+	typeswitch = typechlv;
 	typeword = typechlvp;
 	typecmplx = typesu;
 	/* TO DO */
@@ -764,7 +780,10 @@ gmove(Node *f, Node *t)
 		case TVLONG:
 		case TUVLONG:
 		case TIND:
-			a = AMOV;
+			if(typeu[ft])
+				a = AMOVWU;
+			else
+				a = ASXTW;
 			break;
 		}
 		break;
@@ -788,14 +807,16 @@ gmove(Node *f, Node *t)
 		case TUINT:
 		case TLONG:
 		case TULONG:
-		case TVLONG:
-		case TUVLONG:
-		case TIND:
 		case TSHORT:
 		case TUSHORT:
 		case TCHAR:
 		case TUCHAR:
-			a = AMOV;	/* TO DO: conversion done? */
+			a = AMOVWU;
+			break;
+		case TVLONG:
+		case TUVLONG:
+		case TIND:
+			a = AMOV;
 			break;
 		}
 		break;
@@ -926,7 +947,7 @@ gmove(Node *f, Node *t)
 	}
 	if(a == AGOK)
 		diag(Z, "bad opcode in gmove %T -> %T", f->type, t->type);
-	if(a == AMOV || (AMOVW || a == AMOVWU) && ewidth[ft] == ewidth[tt] || a == AFMOVS || a == AFMOVD)
+	if(a == AMOV || (a == AMOVW || a == AMOVWU) && ewidth[ft] == ewidth[tt] || a == AFMOVS || a == AFMOVD)
 	if(samaddr(f, t))
 		return;
 	gins(a, f, t);
@@ -1277,8 +1298,7 @@ gpseudo(int a, Sym *s, Node *n)
 	p->from.sym = s;
 	p->from.name = D_EXTERN;
 	if(a == ATEXT)
-		//goken: was p->reg = (profileflg ? 0 : NOPROF);
-        p->reg = textflag;
+		p->reg = (profileflg ? 0 : NOPROF);
 	if(s->class == CSTATIC)
 		p->from.name = D_STATIC;
 	naddr(n, &p->to);
@@ -1327,19 +1347,22 @@ sval(int32 v)
 int
 usableoffset(Node *n, vlong o, Node *v)
 {
-	int s, et;
+	int s;
 
-	et = v->type->etype;
-	if(v->op != OCONST || typefd[et])
-		return 0;
+	if(v != nil){
+		if(v->op != OCONST || typefd[v->type->etype])
+			return 0;
+		o += v->vconst;
+	}
 	s = n->type->width;
 	if(s > 16)
 		s = 16;
-	o += v->vconst;
-	return o >= -256 || o < 4095*s;
+	if((o % s) != 0)
+		return 0;
+	return o >= -256 && o < 4096*s;
 }
 
-int32
+long
 exreg(Type *t)
 {
 	int32 o;
@@ -1391,7 +1414,7 @@ schar	ewidth[NTYPE] =
 	SZ_INT,		/* [TENUM] */
 };
 
-int32	ncast[NTYPE] =
+long	ncast[NTYPE] =
 {
 	0,				/* [TXXX] */
 	BCHAR|BUCHAR,			/* [TCHAR] */

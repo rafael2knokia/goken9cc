@@ -1,56 +1,30 @@
 * Big plan
 
 ** TODO changes.txt
-- SEMI fully working arm32 and arm64 mini2/
-- SEMI hello_linux_riscv.exe and exit_linux_riscv.exe
-- TODO revert the changes to va/vc/vl, ia/ic/il, 7a/7c/7l and switch
-  from golang cc/ to kencc-imported cc/
-- TODO switch acid, and 5i/vi from libmach_ to libmach
-
-- bootstrappable (can compile itself)
 
 ** Overview
-
-# fix float/64bits ops arm32 and arm64 tests/c/mini2
-# produce from hello.{s,c} binaries for SEMI (old) macos (amd64 TODO arm64), (386) windows
-# reLPize {Assembler,Linker,Compiler,Libcore}.nw and release (and maybe also {Debugger,Profiler}.nw) "principia-toolchain"!
-# add wasm arch later and bootstrap itself!!!
-# => simpler alt to gcc/clang for cross compiling C code! (ex: xv6-{x86,arm,riscv}!)
+- benchmarks on compcert! with minimal libc/ape
+- libsyscall (thin wrappers around syscalls) for linux/macos/windows/wasm/plan9/xv6
+- libc (or libos), again working for linux/macos/windows/wasm/plan9/xv6 (different from lib9,
+  rely instead on libsyscall)
+- bootstrap itself!!! (need libsyscall/libos first)
+=> simpler alt to gcc/clang for cross compiling C code! (ex: xv6-{x86,arm,riscv}!)
 
 ** Later
 
-*** try riscv hello-world?
-https://9fans.topicbox.com/groups/9fans/T3f252d4d7c5389ee/issue-compiling-hello-world-for-risc-v-on-plan-9-pc-resets
+*** LATER acid working on linux
+incorportate plan9port libmach so can get acid to work on Linux
+also DWARF binaries!
+plan9port use linux interception proc mechanism (ptrace?) similar to plan9
 
+*** LATER dwarf support working for all elf targets, ported from 6c?
 
-*** LATER LONG try to boostrap itself; can compile 5c with 5c?
-need full libc and ELF in 5c/5l working for big C project, not just helloprintf.c
-
-*** LATER devdraw from plan9port to goken? can draw ? can port
-more stuff to unix? doomplan9?
-
-maybe most of Graphics.nw can be tested on Linux?
-at least testdraw.c ?
-
-*** LATER SEMI try to unify all the kencc/inferno/plan9 before lpize (5a/5c/5l) again
+*** LATER SEMI try to unify all the kencc/inferno/plan9 for 5a/5c/5l
 diff5a diff5c diff5l are quite small across kencc/inferno/plan9 and goken
-so no big need to unify. can start from goken probably which has the biggest change
-
+so no big need to unify
 use my diff.rc
 
-*** LATER: start lpize again, redo the work in {Assembler,Linker,Compiler}.nw
-relpize, resplit, but at least can reuse most of the thinking/splitting
-work done for plan9
-AND this time run regression tests first! to catch regression ASAP
-
-update: with 5a_/5c_/5l_ working pretty good, maybe don't have
- to relpize actually and try 5a__/5c__/5l__ from principia's book
- and diff and gradually converge and fix bugs
-
-alt: unless found bugs in plan9 toolchain and go towards merging with goken
-codebase instead
-
-*** LATER RELAX remove dead code like maxbecome/frame in linkers that was used for Alef
+*** still? LATER RELAX remove dead code like maxbecome/frame in linkers that was used for Alef
 tail-call opti
 
 *** LATER relax factorize in other linker ld.h like 7l
@@ -61,22 +35,797 @@ update: better ../lk/
 
 but better wait to avoid diff.rc to show big diffs
 
+*** LATER LONG try to boostrap itself; can compile 5c with 5c?
+need full libc and ELF in 5c/5l working for big C project, not just helloprintf.c
+
+*** LATER devdraw from plan9port to goken? can draw ? can port
+more stuff to unix? doomplan9?
+
+maybe most of Graphics.nw can be tested on Linux?
+at least testdraw.c ?
+
+see plan9port/src/cmd/devdraw/ and also drawterm and more
+
+*** LATER add cii (now MIT license) containers and more generally all cii
+it's good simple C code, and especially address something Plan 9 developers
+avoid (reusable containers lib).
+
+*** LATER? add the alpha architecture? was 7a/7c/8l but can rename to aa/ac/al
+import from 9front 2016 which removed support for it.
+could not find it in plan9 4th edition either
+
+*** LATER? add the 68000? historically interesting, amiga/atari used it!
+also apple so interesting to study?
+
+hmm but actually 2a/2c/2l seems to be more for 68020 not 68000
+that was the amiga/atari
+
+
+*** LATER? add pdp11 archi :) or ask claude
+ack amsterdam toolkit has support for pdp11
+also gcc. and can use simh to run unix v1 etc for real apparently.
+
+that would be a 16 bits archi :)
+
+* Big Unify
+
+** mips toolchain (va/vc/vl)
+
+claude:
+found via /tmp/diffva, /tmp/diffvc, /tmp/diffvl (diff of va/vc/vl across
+9cc/9colombier/inferno/inferno-old/plan9/mykencc/myplan9/kencc-riscv/goken/
+goold/goken-go-variant/9front checkouts in ~/xxx/), cross-checked against
+current goken source
+
+*** va (assembler)
+
+**** RELAX remove dead '-L' little-endian mips flag
+claude:
+assemblers/va/lex.c:39-42 still sets thechar='0'/thestring="spim" but no
+0a/0l/0c tool exists anywhere in the tree. inferno-old already deletes it.
+same dead pattern duplicated in compilers/cck/lex.c:79, linkers/vl/obj.c:66,
+src/cmd/cc/lex.c:113 -> tree-wide cleanup, not va-only
+
+**** RELAX drop legacy hunk/bump allocator in cck/lexbody
+claude:
+9front removes hunk/nhunk/thunk/gethunk() (assemblers/va/a.h:97,104,117,158,
+shared alloc/allocn in compilers/cck/lexbody:44-75, pulled in by va/lex.c)
+in favor of a normal allocator. extends the existing "simplify linker
+allocators" TODO (previously scoped to 5l/6l/7l/8l only) to va and every
+other frontend that includes cck/lexbody
+
+**** bound macexpand() against overflow
+claude:
+compilers/cck/macbody:367-375,505 macexpand(Sym*, char*) does unbounded
+strcpy into a fixed char buf[2000], same bug class as the stack overflow
+already fixed in assemble() (commit 3a4ac6bb4). 9front adds a length param:
+int macexpand(Sym*, char*, int). shared cck code, pulled into va/lex.c
+via #include "../../compilers/cck/macbody" so it's live there too
+
+*** vc (compiler)
+
+**** fix wrong regalloc template in constant compound-assign fast path
+claude:
+compilers/vc/cgen.c:209, case OASAND/OASADD/OASSUB/OASXOR/OASOR when RHS is
+OCONST: `regalloc(&nod, r, nn)` uses r (the constant) as the type/size
+template instead of l (the lvalue), unlike every neighboring case (see
+asbitop cases at lines 228-254, 256-270 which correctly key off l/n).
+9front fixed this to `regalloc(&nod, l, nn)`. small, low-risk, one-line fix
+
+**** make struct-copy temp (nodrat) reentrant
+claude:
+compilers/vc/cgen.c: the global "rathole" temp (nodrat/nrathole/symrathole,
+declared gc.h:149,152,158, init'd txt.c:60-70,106) is not reentrant, and
+the code self-flags this with warn(n, "non-interruptable temporary") at
+cgen.c:405-410 (cgen ODOT), 916-921 (sugen ODOT), 1010-1015 (sugen OSTRUCT
+struct-to-struct assign), 1020 (sugen OFUNC, nn==Z). because nodrat is one
+shared global Node, nested expressions needing two struct-sized temps at
+once (e.g. a struct-valued dot-expr inside another struct copy) can
+silently clobber the first temp -> real correctness bug, not just a
+warning that never fires. 9front eliminates nodrat entirely, replacing
+each use with a per-call regsalloc()'d local Node. fix is mechanical:
+mirror 9front's cgen.c ODOT/OSTRUCT/OFUNC branches, then optionally drop
+the now-unused nodrat/nrathole/symrathole externs and their txt.c init
+
+**** RELAX drop spurious warning on discarded OCAST
+claude:
+compilers/vc/cgen.c:384, OCAST with nn==Z calls nullwarn(l, Z), which
+unconditionally prints "result of operation not used" even for a cast
+used purely for its side effects (e.g. (void)f();-style statements).
+9front just does cgen(l, Z) instead, still generating l's code but
+dropping the spurious warning. cosmetic/diagnostic-quality only
+
+*** vl (linker)
+
+**** LATER add ELF64/MIPSR4K support
+claude:
+plan9's vl adds HEADTYPE case 7 = elf64(MIPSR4K, ...) and widens pc,
+textsize, INITTEXT, INITDAT, INITRND, Sym.value from int32 to vlong
+throughout l.h/asm.c/pass.c/span.c. goken's linkers/vl/obj.c:140 and
+asm.c:329 only ever call elf32(), and l.h:63,192-195,238,242 still
+declares these as int32. elf64()/MIPSR4K already exist in the shared
+linkers/lk/elf.h (used by other linkers, e.g. 6l/8l) but vl never calls
+them -> real missing feature, only matters if MIPS64 output is wanted
+
+**** honor DUPOK on data symbols in datblk()
+claude:
+linkers/vl/asm.c:588, the "multiple initialization" overlap check is
+`if(p->as != AINIT && p->as != ADYNT)` with no DUPOK test. TEXT symbols
+already respect DUPOK for redefinition (obj.c ~931, `if(p->reg & DUPOK)`)
+but DATA symbols don't get the same suppression. 9front adds a
+Sym.dupok field (set from p->reg & DUPOK on AGLOBL) and checks
+!p->from.sym->dupok in datblk(). can produce spurious "multiple
+initialization" diagnostics for legitimately duplicated DUPOK data
+(e.g. read-only tables emitted by more than one translation unit)
+
+**** RELAX remove sprint() in vl/list.c and vl/pass.c
+claude:
+vl/list.c (e.g. lines 31-210) and vl/pass.c (lines 136-150) still use
+unbounded sprint() into fixed buffers (str[STRINGSZ], literal[]) with
+symbol names of arbitrary length interpolated. 9front replaced these
+with snprint(..., sizeof ...) throughout list.c/pass.c/obj.c. same bug
+class as the va stack overflow already fixed (commit 3a4ac6bb4), not
+an observed crash here yet but matches the existing "RELAX remove
+sprint()" TODO under Last1/Last2 above -> vl-specific instance of that
+
+** arm64 toolchain (7a/7c/7l)
+
+claude:
+found via /tmp/diff7a, /tmp/diff7c, /tmp/diff7l (diff of 7a/7c/7l across
+9cc/9colombier/kencc-riscv/goken/9front checkouts in ~/xxx/ -- the other
+lineages don't have an arm64 port at all, it postdates them). Much bigger
+diff than mips: 9front's arm64 backend is considerably more evolved than
+goken's own (already-extensive) arm64 work. Landed so far (see
+plan9front.txt and git log for the full writeup of each):
+vlong/pointer conversion + immediate-offset folding (b117d7014), the
+gmove() same-address-skip typo, struct-copy trailing-byte drop, regopt()
+NRGN growable array, mkvar() .ret tracking, and the LDAR/STLR/LDXR/STXR/
+LDAXR/STLXR atomics fix (223e8ad00 + 61f6376b1) with a real qemu-verified
+test. Also since landed, not from the 9front diff (goken-original bugs
+found while porting benchs/compcert/{vmach,sha3,siphash24}.c -- see
+notes_arch_arm64.txt for the full writeups): bcomplex()'s vlong-
+condition fast path silently emitting no branch at all, two large-
+uvlong-constant truncation bugs (mkvar()'s constant-registerization
+width, addpool()'s literal-pool sizing), and isbitcon()'s oversized
+32-bit bitmask-immediate fallback plus asmout.c's related N-bit
+encoding bug (a narrower fix than the isbitcon32()/isbitcon64()
+class-split originally scoped below -- landed instead of that, not in
+addition to it; revisit the fuller split only if a new case turns up
+that the narrower fix doesn't cover). Remaining, not done:
+
+*** 7c (compiler)
+
+**** binarytrees.c: ItemCheck() makes exactly one extra call with tree==NULL, iff main() also uses pow()
+claude:
+Found while trying to unblock benchs/compcert/binarytrees.c. Second
+pass at this bug (see git history for the first pass's now-superseded
+theory, which blamed print()'s own formatting path directly -- still
+true that a print() call is *involved*, but the actual trigger and
+symptom are both much more specific than that pass had pinned down).
+Real, 100%-deterministic SIGSEGV on darwin/arm64 -- not a probabilistic
+memory-corruption symptom the way the "small leftover pointer value"
+framing from the first pass suggested.
+
+Precise, reproducible finding (minimal repro: BottomUpTree/NewTreeNode/
+ItemCheck/DeleteTree copied verbatim from binarytrees.c into a
+standalone main(), see scratchpad -- not yet promoted to a committed
+tests/c/regressions file, that's the natural next step): instrument
+ItemCheck() with a global call counter and a guard
+(`if((unsigned long)tree < 0x1000) { report and exit; }`) before
+dereferencing. For a perfect binary tree of depth D (built by
+BottomUpTree(0,D), exactly 2^(D+1)-1 nodes), a call to
+`ItemCheck(root)` should make exactly 2^(D+1)-1 total recursive calls,
+one per node, and never see tree==NULL (every real node's `left` is
+either a valid pointer or NULL, and NULL is only ever *checked*, never
+recursed into -- see ItemCheck's own `if(tree->left==NULL) return
+tree->item;` base case). Observed instead: **exactly** 2^(D+1)-1
+*successful* calls happen (a fully correct traversal of the entire
+real tree), immediately followed by **exactly one** extra, spurious
+call with tree==NULL -- verified identically at D=8,10,12,14,16,17,18
+(counts 511/2047/8191/32767/131071/262143/524287, i.e. 2^(D+1)-1 in
+every case, no exceptions). This is not "a pointer got corrupted
+somewhere in a quarter-million-node tree" -- it's "the recursion
+that should stop after the last leaf takes one more step it
+shouldn't."
+
+The trigger, isolated by minimization, is unrelated to the print()
+call's own arguments or format verbs (the first pass's theory) and
+instead is: **main() calls pow() *anywhere*, even in code never
+reached before the crash**. Concretely: take the real binarytrees.c
+structure verbatim (all four functions, main()'s full body including
+the depth-loop that calls pow() to compute `iterations`), and the bug
+reproduces on the very first `ItemCheck(stretchTree)` call, which
+happens before that loop ever executes. Delete just the
+`iterations = pow(2, maxDepth-depth+minDepth);` line (replace with a
+constant) and the *identical* program, *identical* tree, *identical*
+ItemCheck()/DeleteTree() traversal, runs to completion with zero extra
+calls, exit 0. Re-add the pow() call (even wrapped in a
+provably-never-taken `if` branch elsewhere in main(), confirmed via
+7l -a to actually still emit real FMOVD/BL-pow/FCVTZSDW instructions,
+not dead-code-eliminated) and it's back to instrument-and-crash. So
+the causal factor is "does main()'s compiled body contain
+floating-point codegen", not "is pow() actually called at runtime" or
+"is print() given a particular argument."
+
+Ruled out via direct verification, not assumption:
+- NOT address-magnitude-dependent: a separate minimal repro
+  (BottomUpTree/ItemCheck/DeleteTree with *no* pow() anywhere, heap[]
+  offset controlled directly by pre-`malloc()`ing and discarding N MB
+  before building the tree) never reproduces the bug for any tested
+  offset 0-128MB, at tree depths up to 17 -- despite this covering,
+  and exceeding, the actual address range (~16-84MB) where the pow()
+  variant's stretchTree lands across several runs. The pow()-present
+  variant's own stretchTree address is *not* stable run-to-run (real
+  ASLR is evidently applied to this BSS heap[] array despite the
+  binary's own code segment loading at a fixed, non-PIE address) --
+  but the bug fires at the exact same call-count boundary on every
+  run regardless of the specific address, which is itself evidence
+  this is a logic bug, not a data/memory-corruption one.
+- NOT a bug in ItemCheck()'s, DeleteTree()'s, NewTreeNode()'s, or
+  BottomUpTree()'s own compiled code: `7l -a` disassembly of all four
+  functions is byte-identical (down to the opcode, modulo relocation-
+  driven immediate/branch-target differences that shift with overall
+  binary size) between the pow()-free (survives) and pow()-present
+  (crashes) builds. Same for main()'s own instructions up through and
+  including the `BL ItemCheck` call site itself. Whatever differs is
+  either something at that exact call site not visible in a plain
+  diff (e.g. a register/stack-slot decision that happens to encode
+  identically here but behaves differently, unlikely but not yet
+  disproven) or, more likely given the FP-codegen correlation, a
+  callee-saved-register save/restore bug specific to when main()'s own
+  prologue/epilogue needs to preserve floating-point (D8-D15,
+  AAPCS64 callee-saved) registers alongside integer ones -- not yet
+  confirmed by reading main()'s actual prologue/epilogue for a missing
+  or miscomputed FP register spill, which is the natural next step.
+- NOT reproducible via a global-counter artifact: the same "exactly
+  one extra call, argument exactly 0" result held when spot-checked
+  independently (see the instrumentation itself, which reports the
+  *argument value* the guard rejected, not just an internal count).
+- lldb address-based breakpoints (`breakpoint set -a <addr>`) remain
+  unreliable on this project's own -H6 Mach-O output -- confirmed
+  "set" with a real resolved address but did not actually stop
+  execution there, even for addresses causally before the crash;
+  print()-based instrumentation (add a guard + report + exit, per
+  above) was what actually cracked this, not lldb. Worth checking
+  whether this is a property of this project's minimal Mach-O load
+  commands or an lldb-specific issue before relying on lldb here
+  again.
+- The host's endpoint security software quarantining freshly-built
+  ad-hoc-signed binaries (see notes_debug_techniques.txt) resurfaced
+  mid-session, this time correlated with *specific directories*
+  accumulating many rebuilds rather than a global block -- switching
+  to a directory with an established history of successful builds
+  this session (rather than a brand new one) reliably unblocked it.
+  Worth trying before concluding the host is fully wedged.
+
+Checked, and ruled out, one specific next step already: main()'s own
+prologue (`MOV R30,-112(R31)!`, nothing else) and epilogue (`MOV
+$0,R0; MOV (R31)112!,R30; RET`, nothing else) are identical in shape
+to the pow()-free build and never save/restore any register beyond
+LR/R30 -- so this is NOT main() itself failing to preserve a
+callee-saved FP register (D8-D15) around its own body; the FP values
+main() computes for `iterations` use F0-F4, which are caller-saved
+under AAPCS64 and need no such preservation by main() itself. If a
+callee-saved-register-accounting bug is still the right family (this
+file's other REGMIN/REGMAX and register-mask entries are the closest
+precedent for "register bookkeeping goes wrong under specific
+register-class-mixing conditions"), it would have to be inside pow()
+itself (a large function, easily worth checking whether *it*
+correctly restores every callee-saved register, D8-D15 and R19-R28
+alike, given how much internal scratch state its polynomial
+computation needs) -- but pow() is never actually *called* before the
+crash point (it lives in a loop body that hasn't executed yet), so any
+bug in pow() itself can only matter here via some link-time/layout
+side effect of pow()'s mere presence (code size, symbol/constant-pool
+placement) rather than its execution. That side-effect is the
+remaining open question: two functions' worth of machine code
+(main()'s shared prefix, and all of NewTreeNode/ItemCheck/
+BottomUpTree/DeleteTree) were confirmed byte-identical between the
+crashing and non-crashing builds, which makes it hard to see how
+runtime *behavior* can differ at all -- unless it's a data dependency
+on an address that shifts between builds (heap[]'s own BSS address is
+confirmed to shift substantially, though direct testing of that one
+address via artificial padding did not reproduce the bug on its own;
+some other address -- a constant pool, a string literal, `itcheck_n`
+itself -- shifts too and hasn't been individually tested the same
+way). Whoever picks this up next should either: (a) systematically
+test each shifting address in isolation the way heap[] was tested, or
+(b) get a working interactive debugger on this project's own -H6
+Mach-O output (lldb's unreliability here was the main blocker to going
+faster) and single-step through the actual `BL ItemCheck` call site
+and its return path with real hardware watchpoints on the relevant
+stack slots.
+
+claude:
+Second confirmed instance of this same bug class, found independently
+while trying to unblock benchs/compcert/knucleotide.c (linux/arm64
+this time via qemu-user, not darwin/arm64 -- so this is not a
+darwin-specific or Mach-O-specific phenomenon, it reproduces under 7c/
+7l regardless of target OS). knucleotide.c's crash (SIGSEGV inside
+write_frequencies()'s `printf("%s %.3f\n", ...)` call) traces back to
+the same "mere presence, not execution" shape as pow() above, but a
+first pass at characterizing it (blaming fopen()/fgets()/fclose()
+specifically, or float-register allocation) was WRONG -- see below for
+the real, much more general trigger, found by continuing to isolate
+after that first pass didn't hold up under -O0 testing.
+
+Real trigger, fully isolated via a 3-file minimal repro (not yet
+promoted to tests/s/regressions/, see todo below): compile two
+separate .c files with 7c, link both together with 7l. File A (main)
+has a dead, provably-never-taken call (`if(neverrun){ helper(); }`,
+`neverrun` a global int initialized to 0) to a function `helper()`
+defined in File B. If `helper()`'s own body makes an external call to
+*any* function living in a third place (libc.a -- confirmed with both
+open() and strdup(), unrelated functions in unrelated libc.a members),
+something elsewhere in the final binary gets corrupted -- concretely,
+main()'s own later `print("%d\n", i)` call (integer, not float --
+floats are NOT required to trigger this, that was the misleading part
+of the first pass) segfaults. If `helper()` is a trivial function with
+no external call (`return x+1;`), no crash. If the exact same
+dead-code-calls-helper() structure is kept but `helper()` lives in the
+*same* object file as main() instead of a separate one (whether as a
+separate function or inlined), no crash, even though it still makes
+the same external call to open()/strdup()/whatever. So the trigger is
+specifically: >=2 separate 7c-compiled object files linked together,
+where a non-entry object file itself contains a call to an external
+symbol -- not which symbols are involved, not floats, not registers,
+not fopen/fgets/fclose specifically (those were just the first,
+misleading way this was noticed, because lib_core/libc/APE/stdio.c
+happens to be exactly this shape: a separately-compiled object file
+whose fopen()/fgets()/fclose() each call another external function,
+open()/read()/close(), that lives in yet another libc.a member).
+Confirmed independent of regopt()/peephole/-O level entirely: crashes
+identically at -O0 through -O3 (byte-identical machine code for the
+crash-adjacent block was verified across all four) -- ruling out the
+optimizer as the culprit and pointing squarely at either cgen.c's base
+codegen or (more likely, given the trigger is about *linking multiple
+object files*, not anything in one function's own compiled shape)
+something in 7l's handling of BL-relocations/symbol layout when
+resolving an external call that originates from a non-entry object
+file. NOT yet root-caused at the instruction level: manually decoding
+the raw machine code around the actual crash site (main()'s own
+print() call) shows byte-correct, self-consistent instructions with no
+visible corruption -- so whatever's wrong is either in exactly which
+address something resolves to (a wrong but validly-encoded relocation
+target) or in something not visible in that local disassembly at all.
+Confirmed 7c/7l-specific (arm64), not a general goken-toolchain issue:
+the byte-identical 3-file repro does NOT crash when built with 6c/6l
+(amd64) instead of 7c/7l -- real knucleotide.c itself also builds,
+runs, and matches Results/knucleotide exactly on amd64. 386 was also
+tried but hits a separate, pre-existing, already-documented bug first
+(dofmt.c hangs formatting %g of a small-magnitude double on 8c/5c, see
+benchs/compcert/test_goken_archs.sh's own TIMEOUT comment) before this
+one could be observed there. Not yet tested on arm/mips/riscv/riscv64.
+
+Given this is a general multi-object-file linking bug (not anything
+specific to knucleotide.c, fopen, or floats), it's potentially much
+higher-impact than just this one benchmark -- worth escalating past
+"whoever picks up the pow() investigation" framing. Concrete next
+steps for whoever picks this up:
+1. Promote the 3-file repro (main.c with `if(neverrun){ helper(); }`,
+   helper.c calling any external libc.a function, e.g. open()) to
+   tests/s/regressions/ or tests/c/regressions/ -- it's small, fast,
+   and 100% deterministic, unlike pow()'s own not-yet-minimal repro.
+2. Get `7l -a`'s disassembly of BOTH the 2-object (crashing) and
+   1-object (safe) builds and diff them fully (not just the print()
+   call site, which was checked and found byte-identical in isolation
+   -- the corruption must be visible somewhere else in the diff, e.g.
+   a different symbol's address, a relocation table entry, or
+   something in how 7l lays out multiple TEXT sections).
+3. Check whether this is really about the *number* of object files
+   (does a 4-file chain behave differently from 3?) or specifically
+   about "an external call originating outside the entry object" --
+   the 3-file repro conflates these, not yet disambiguated.
+See docs/claude_notes/notes_debug_techniques.txt's newest section
+("isolating a crash trigger to which of several *structural* facts
+about a program is responsible, by holding the code content fixed and
+varying only object-file boundaries") for the technique that got this
+finding, and for why the earlier fopen/fgets/fclose-specific and
+float-register theories are corrected here, not just superseded
+silently.
+
+Separate, unrelated bug hit while trying to control tree depth via a
+real command-line argument (`./binarytrees.goken 16`) instead of
+editing source constants, worth its own follow-up: on darwin/arm64,
+reading `argv[1][0]` in a goken-built program crashes immediately
+(SIGSEGV) as soon as *any* real command-line argument is passed --
+confirmed with a 5-line isolated repro (print argc, which is correct,
+then dereference argv[1] directly, which crashes) having nothing to do
+with atol()/printf()/binarytrees.c/pow() at all. Not investigated
+further this pass; likely in the arm64 rt0.s/_main argv-setup path.
+The actual benchs/compcert test suite invocation never passes
+command-line args (matches how Results/binarytrees itself was
+generated), so this isn't blocking that specific benchmark, but it's a
+real, separate bug in its own right and worth its own regression test
+once picked up.
+
+**** fix regalloc type-mismatch in compound multiply/divide/mod assign
+claude:
+compilers/7c/cgen.c:290,293 (case OASLMUL/OASLDIV/OASLMOD/OASMUL/OASDIV/
+OASMOD), `regalloc(&nod, n, nn); cgen(r, &nod);` sizes/classes `nod` from
+`n` (the whole expression's type) *before* r is evaluated into it, then
+reuses that same `nod` regardless of whether r turned out to be a
+different register class (float vs int) than l. 9front's fix (same
+commit as usableoffset() above) evaluates r into its own nod1 first,
+then explicitly compares nod1/nod2 (l's value) etypes to decide nod's
+class: `if(nod1.type->etype == nod2.type->etype || !typefd[nod1.type->etype])
+regalloc(&nod, &nod2, nn); else regalloc(&nod, &nod1, Z);`. Tried
+reproducing with `int x; double y; x *= y;` and the reverse (`double d;
+int i; d *= i;`) -- both already compute correctly on current goken, no
+observed difference, same pattern as several other 7c fixes this pass.
+Real logic difference from upstream nonetheless; low priority given no
+demonstrated impact
+
+**** verify/port boolgen() FP-vs-immediate-zero compare fix
+claude:
+compilers/7c/cgen.c:731 `gopcode(true ? o | BTRUE : o, nodfconst(0), &nod, Z)`
+passes a raw FCONST 0.0 as a compare operand directly. 9front's
+equivalent instead does `regalloc(&nod1, n, Z); gmove(nodfconst(0.0), &nod1);
+gopcode(..., &nod1, &nod, Z); regfree(&nod1);` -- loads 0.0 into a real
+register first. Not yet investigated whether asmout()'s FCMP encoding
+here actually requires a register operand (real arm64 FCMP does have a
+valid `Fn, #0.0` immediate-zero encoding, so this might be a no-op
+change already covered) or whether goken's specific encoding path needs
+it. Unexamined -- lowest-confidence item on this list
+
+**** LATER widen register allocator's usable range (REGMIN..REGMAX)
+claude:
+linkers/7l/7.out.h:15,18-19,22 REGMIN=9, REGMAX=15 (7 usable general
+registers, R9-R15), REGIRL=8 reserved but unused ("indirect result
+location (TO DO)"), REGTMP=REGIP1=17. 9front drops REGIRL and widens to
+REGMIN=9, REGMAX=23 (15 usable registers, R9-R23), with REGTMP=17 kept
+as a plain constant (no longer REGIP1) and matching bitmask-math changes
+in compilers/7c/reg.c RtoB()/BtoR() (mask width `1+REGMAX-REGMIN`,
+explicit REGTMP exclusion). Real codegen-quality win (roughly halves
+spill pressure) but touches ABI-adjacent register reservations across
+reg.c/txt.c -- needs testing against more than a unit snippet before
+trusting it, unlike the other mechanical ports on this list
+
+**** RELAX chipfloat()/case 54 immediate-float encoding is dead code
+claude:
+linkers/7l/asm.c:626 `if(p->l == e->l && p->h == e->h && 0) return n;`
+(the `&& 0` makes this always false) and asmout.c's case 54
+`if(rf < 0 || 1){ diag(...); rf = 0; }` (the `|| 1` makes this always
+diag) mean chipfloat() can never succeed and case 54's D_FCONST branch
+always errors. Confirmed via disassembly this is unreachable in
+practice: 7c always materializes float constants through a memory/
+symbol reference (`FMOVD $0.xxx+0(SB), F0`), never the immediate-encoded
+form this would service. 9front replaces chipfloat() with a real
+bit-pattern decoder, but fixing just that -- without also changing 7c's
+constant-loading strategy to actually attempt this path -- would be an
+unverifiable no-op. Skip unless someone wants to also port the codegen
+change that makes it reachable
+
+*** 7l (linker)
+
+**** investigate: misaligned constant-offset global access fails to link
+claude:
+found while testing the usableoffset() fix (see plan9front.txt), *not*
+fixed by it: `*(long long*)(buf + 4099) = v;` on a global array fails to
+link outright with "internal: miscalculated offset" from
+linkers/7l/asmout.c:457,477 (case 30/31, long-displacement store/load).
+This goes through naddr()'s direct D_EXTERN+offset construction (a
+compile-time-constant address+offset, never passing through cgen.c's
+usableoffset()-guarded folding decision at all), so it's a genuinely
+separate bug from the one b117d7014 fixes. Real, reproducible, but root
+cause not yet identified -- needs tracing through how naddr() builds the
+Adr for a global+constant-offset expression and where the 12-bit-aligned
+high/low decomposition assumption in case 30/31 breaks for a misaligned
+offset
+
+**** RELAX LDXP/LDAXP/STXP/STLXP (128-bit exclusive load/store pair)
+claude:
+linkers/7l/7.out.h still has ALDXP/ALDXPW/ALDAXP/ALDAXPW/ASTXP/ASTXPW/
+ASTLXP/ASTLXPW enum values and opload()/opstore() case labels (kept,
+matching 9front, since they're harmless dead code once unreachable), but
+after the LDAR/STLR atomics fix they have no 7a mnemonic-table entries
+or linkers/7l/optab.c rows, so they can't actually be assembled. 9front
+dropped these deliberately (commit 61f6376b1: "i have also dropped
+atomic load and store register pair operations since they are wrong and
+we would need to deal with the four operand STLXP") rather than leaving
+them silently broken. Not implementing: would need a genuinely different
+4-operand Adr/Gen model (two destination registers) this port doesn't
+have; matches 9front's own call to just not support these
+
+**** LATER port peep.c's newer optimizations
+claude:
+9front's compilers/7c/peep.c has grown substantially beyond what goken
+carries (goken's peep.c: 1564 lines, structurally still close to the
+original 9cc version -- no isu32op()/independent()/storeprop() or the
+"software pipeline loads" pass 9front added). Includes: redundant-move
+elimination for same-typed sequential loads, ROR/RORW copy-propagation,
+SXTW simplification following byte/half/word loads, and a load-pipelining
+pass that reorders an independent instruction between a load and its
+first use. Real perf work, large surface area, many interacting cases --
+deserves its own review pass rather than a quick port, unlike the
+mechanical Tier-3-style fixes already landed
+
+**** LATER add missing instruction encodings
+claude:
+9front's linkers/7l/asmout.c has several instruction forms goken's
+optab.c/asmout.c don't: register-pair load/store (MOVP/MOVPS/MOVPD,
+case 66/67), register-offset indexed load/store (case 68/69, e.g.
+`MOVW R(R),R` addressing), proper 3-operand FMADD/FMSUB/FNMADD/FNMSUB
+encoding (case 70, FPOP3S), FMOV directly between integer and float
+registers (case 55, opfmovr()), and CBZ/CBNZ/TBZ/TBNZ branch-shrinking
+in gopcode() (zcmp(), replacing a CMP+Bcond pair with a single
+compare-and-branch when comparing against 0) -- the last one is coupled
+with a matching literal-pool-range fix in checkpool()/ispcdisp(), so do
+those two together if at all. Coherent "tighter/more complete codegen"
+project, not a bug fix; lower priority than the correctness items above
+
+** riscv toolchain (ia/ic/il)
+
+claude:
+found via /tmp/diffia, /tmp/diffic, /tmp/diffil (diff of ia/ic/il across
+9cc/9colombier/inferno/kencc-riscv/miller-riscv/goken checkouts in ~/xxx/
+-- 9front has no riscv port at all, base=inferno since 9cc doesn't have
+ia/ic/il either). Two candidate sources: kencc-riscv is a from-scratch,
+divergent RV32E-oriented rewrite (its own register numbering, its own
+ELF writer, dropped float/CSR support) -- not a good porting source,
+it's a different backend, not a superset; its only real contribution
+was surfacing the boolgen()/comrel restructuring idea (see below).
+miller-riscv (a Plan 9 riscv port, June 2025 checkout) is the valuable
+one: an actively-maintained continuation of the same dual 32-/64-bit
+('i'/'j') lineage goken already uses. Landed so far this session (see
+plan9front.txt and git log for the full writeup of each): riscv64
+('j') actually works end to end now, not just on paper -- ja/jc/jl are
+real installed binaries, not stubs. That surfaced and fixed three
+goken-original bugs along the way (an ELF header-size miscalc, a
+setSB/symbol-address bug, and a stale-pointer-width bug in ic's own
+dual-width ginit()), plus one diff-derived fix from miller-riscv
+(SRAIW silently executing as SRLIW) and one cross-arch-consistency fix
+shared with mips (fnuxi8[] float-constant stack overread in il/vl).
+tests/s/{exit,mini} and tests/c/{mini2} all have riscv64 coverage now.
+Remaining, not done:
+
+*** ic (compiler)
+
+**** boolgen()/comrel() NaN-comparison bug -- deeper than expected
+claude:
+compilers/ic/cgen.c:763, compilers/vc/cgen.c:636,730 -- boolgen()
+applies comrel[] (the integer logical-complement table, OLT<->OGE,
+OLE<->OGT, OEQ<->ONE, etc) to the source-level relational operator
+unconditionally, before checking whether the comparison is floating-
+point. That complement is sound for integers (total order) but not for
+IEEE-754 comparisons under NaN: e.g. "!(x < y)" is not equivalent to
+"x >= y" when x or y is NaN (both are false for NaN operands). This is
+shared kencc lineage code -- present in every backend's boolgen() (5c/
+6c/7c/8c/vc/ic and the 5ck/7ck/8ck variants), but 7c/5c already carry a
+compensating fix in gmove()/boolgen() ("ensure NaN comparison is
+always false", substituting ABMI/ABPL/ABHI/ABLS for the naive signed
+branches when typefd[et]). Confirmed real on both riscv and mips with
+a live qemu run: "x = 0.0/0.0; y = 1.0;" wrongly evaluates x>y and
+x>=y as true on riscv, x<y and x<=y as true on mips.
+
+Tried the obvious fix (mirroring kencc-riscv's restructuring: move the
+comrel[] application out from before the typefd check to only the
+integer-specific branches) -- it does NOT work. Confirmed empirically:
+it just changes *which* operators come out wrong (riscv: x<y, x<=y,
+x==y wrong instead of x>y, x>=y -- a lateral move, not a fix).
+Root cause is deeper: compilers/ic/txt.c's gopcode() (case OGE:1217,
+OGT:1225, `cmpfloat:` 1246) has its own synthesis for OGE/OGT, because
+RISC-V's FPU only has native FEQ/FLT/FLE, no FGT/FGE -- it computes
+FLE/FLT then branches on the *inverted* sense (`ab`), and that
+synthesis is independently NaN-unsound (assumes "!(x<y) implies x>=y",
+the same unsound total-order assumption, just relocated). boolgen()'s
+comrel[] turns out to be partly *compensating* for gopcode()'s
+synthesis rather than purely redundant with it, which is why removing
+it breaks cases it was accidentally getting right. A real fix needs to
+untangle both pieces together (likely: fix gopcode()'s OGE/OGT
+synthesis to be NaN-safe first, matching 7c/5c's ABMI/ABPL/ABHI/ABLS
+approach as closely as this ISA allows, *then* revisit whether
+boolgen()'s comrel[] still needs adjusting on top) -- not the
+"easily testable" one-line reorder it first looked like
+
+**** RELAX gmove() TUCHAR/TUSHORT store uses AMOVB not AMOVBU
+claude:
+compilers/ic/txt.c:743 (the store-direction switch) uses AMOVB for
+both TCHAR and TUCHAR (AMOVH for both TSHORT/TUSHORT). miller-riscv's
+diff adds an AMOVBU/AMOVHU variant here, gated behind a debug-flag
+combination (`if(!debug['N'] || debug['R'] || debug['P'])`) that looks
+like exploratory/half-finished code in miller-riscv itself, not a
+clean fix. Checked: RISC-V has no signed/unsigned distinction for
+*stores* (only `sb`/`sh`/`sw`, no unsigned variant -- that distinction
+only exists for *loads*, where lb/lbu differ in how they extend into a
+wider register). ic's own load-direction switch (txt.c:702-710)
+already correctly uses AMOVBU/AMOVHU for TUCHAR/TUSHORT. So this is a
+non-issue for goken's riscv backend specifically; not porting
+
+**** LATER investigate TUINT/TULONG AMOVWU vs AMOVW ("/* sic */")
+claude:
+compilers/ic/txt.c:717,894 currently use AMOVWU (zero-extending word
+load) for TUINT/TULONG. miller-riscv's diff changes one of these two
+spots to AMOVW with a "/* sic */" comment (Latin for "yes, really,
+despite appearances") -- suggesting the miller-riscv author found
+AMOVWU caused some other problem and deliberately reverted to AMOVW,
+but the diff alone doesn't explain why. A basic zero-extension check
+("unsigned long x = 0xFFFFFFFF; x >>= 32;" and read back) didn't
+discriminate -- turned out to be invalid C on this platform anyway
+(SZ_LONG=4 here, i.e. `long`/`unsigned long` are 32-bit even under
+thechar=='j', so shifting by 32 is UB, not a real test). Lowest-
+confidence item on this list; needs a real discriminating test found
+before touching it, not just re-reading the diff
+
+**** RELAX AREM/AREMW/AREMU/AREMUW missing from peep.c's case lists
+claude:
+compilers/ic/peep.c:233,478,614 (subprop()/copyu()/a2type()) group
+AMUL/AMULW with the other arithmetic opcodes but don't include
+AREM/AREMW/AREMU/AREMUW, unlike miller-riscv's diff which adds them.
+Checked: copyu()'s `default:` case (unrecognized opcode) already
+returns the safe/conservative "set and used" value, so this is a
+missed peephole optimization for remainder ops, not a correctness
+bug. Cheap and mechanical to add, but no demonstrated impact -- skip
+unless someone wants the marginal codegen-quality win
+
+**** LATER widen register allocator's usable range (REGALLOC)
+claude:
+linkers/il/i.out.h:25 REGALLOC=15 (only 7 usable general registers,
+R9-R15, out of riscv's 32). miller-riscv widens to REGALLOC=31 with a
+new REGLOWALLOC=9, plus matching bitmask-math changes in compilers/
+ic/reg.c RtoB()/BtoR() (mask width, base-register offset). Same shape
+and same risk profile as the arm64 REGMIN/REGMAX item above: a real
+codegen-quality win, but ABI-adjacent and needs testing against more
+than a unit snippet -- now at least testable on both riscv32 and
+riscv64 (arm64's equivalent item could only be tested on the one
+width it has)
+
+**** RELAX disabled byte/half->word promotion in reg.c's paint3()
+claude:
+compilers/ic/reg.c:1053 has a `#ifdef maybe`-disabled block: once a
+variable is fully register-resident, narrow AMOVB/AMOVBU/AMOVH/AMOVHU
+loads/stores against its original memory slot could be widened to a
+full AMOVW (no more need for byte/half-granularity access once it's in
+a register). miller-riscv enables this and extends it to the store
+side too (paint3()'s `to`-side pass, which goken doesn't even have the
+dead code for). Same shape as arm64's chipfloat()/case-54 item: real
+but unverified perf tweak, disabled code, not a bug. Skip unless
+someone wants to also verify/enable it
+
+**** LATER regalloc()'s "reuse lowest free register" (RVC-friendliness)
+claude:
+compilers/ic/txt.c:338 regalloc()'s free-register search currently
+round-robins via a static `lasti` counter (spreading allocations across
+the whole REGRET+1..REGALLOC range). miller-riscv's diff removes the
+round-robin and just takes the lowest-numbered free register every
+time, with the comment "reuse lower registers to aid instruction
+compression" -- RISC-V's C (compressed, 16-bit) instruction extension
+can only reference registers x8-x15, so biasing allocation toward low
+register numbers increases how often the linker's compress.c pass can
+shrink an instruction. Real optimization, but only pays off if RVC
+compression is actually enabled/exercised in this build -- worth
+checking linkers/il/compress.c's current state before porting this
+
+*** il (linker)
+
+**** confirmed bug, riscv64-only: absolute address fed to auipc (case 18)
+claude:
+linkers/il/asm.c:868 (case 18, "lui L1, T; jal [r,]L0(T)" -- the long-
+jump-beyond-direct-jal-range fallback) computes `v = p->cond->pc`,
+then for thechar=='j' does `vv = v + INITTEXT; v = (int32)vv;` and
+feeds that *absolute* address straight into `OP_UP(REGTMP, v)`, which
+emits `auipc` (a *PC-relative* instruction: result = pc + (imm<<12)).
+The neighboring case 20 (linkers/il/asm.c:892, the general large-
+constant-load case) already does this correctly for the same 'j'
+variant: `vv = regoff(&p->from) + instoffx - (pc + INITTEXT)` --
+subtracts the current PC to get a proper delta before feeding it to
+auipc. Confirmed real by this internal-consistency argument (not yet
+independently reproduced with a live test: it only fires for a call/
+jump target beyond direct `jal`'s ~1MB range, which needs a
+deliberately huge test function to trigger -- now buildable given
+working jc/ja/jl, just not attempted yet)
+
+**** RELAX slliw/srliw/sraiw case-2 dispatch -- DONE
+claude:
+was here as a candidate (miller-riscv changes optab.c's slliw/srliw/
+sraiw "type" field from 2 to 1); landed and confirmed via live qemu
+run (SRAIW was silently executing as SRLIW, discarding the sign of
+"x >>= n" on signed ints). See git log and plan9front.txt. Leaving this
+entry as a marker so it isn't re-proposed from a future diff re-run.
+
+** amd64 toolchain (6a/6c/6l)
+
+claude:
+found via /tmp/diff6a, /tmp/diff6c, /tmp/diff6l (diff of 6a/6c/6l across
+9cc/9colombier/inferno/inferno-old/plan9/mykencc/myplan9/kencc-riscv/
+miller-riscv/goken/goold/goken-go-variant/9front checkouts in ~/xxx/).
+Much bigger diffs than mips/arm64/riscv (6l's 9front section alone is
+2409 lines), so the initial read was delegated to a background agent
+rather than done by hand; findings cross-checked against current
+source before landing anything. 9front was again the richest source.
+goold and goken-go-variant are both pure noise for this arch
+specifically: 6a/6c/6l was recently re-imported fresh from
+plan9foundation/plan9.git (see changes.txt), demoting the old go-era
+lineage to 6ag/6cg/6lg as an intentionally-separate tool -- so diffing
+against goold/goken-go-variant just re-surfaces that already-resolved
+divergence, not new signal. inferno/plan9 mostly just confirm current
+6a/6c/6l already matches or improves on that shared ancestry (several
+"diffs" there are actually goken already carrying a fix upstream
+lacks, e.g. the zaddr()/Ieee int32-vs-long truncation fixes and the
+-z/PIE hardconst()/doindex() work already landed this session -- see
+changes.txt). Landed so far (see plan9front.txt and git log): the
+APSLLQ opcode bug (6l assembled "PSLLQ $imm,X" as a no-op MOVQ instead
+of a shift) and the "x *= 0;" mulgen1() compile failure (6c, and
+independently 8c/8ck). Remaining, not done:
+
+*** 6c (compiler)
+
+**** OAS hardleft paths drop a nested assignment's value into nn
+claude:
+compilers/6c/cgen.c:114-117 (the "l->op==OINDEX && immconst(r)" fast
+path inside the hardleft branch) does `gmove(r, l); break;` with no
+`nn` propagation, and the general hardleft fallback at line 133
+(`gmove(&nod, &nod1); regfree(...); break;`) has the same gap --
+compare the non-hardleft path at lines 119-124, which correctly does
+`if(nn != Z) gmove(r, nn);` right next to the equivalent store. So an
+assignment-used-as-a-value through one of these two specific paths,
+e.g. `x = (a[i] = 42);` where the OINDEX/immconst fast path or the
+general hardleft fallback fires, would silently drop the outer
+assignment (x keeps its old value) instead of receiving 42. 9front
+adds the missing `if(nn != Z) gmove(...);` call to both spots. Real,
+verbatim upstream-diverging logic bug -- but could not manufacture a
+test that visibly misbehaves within budget (regalloc's nn-hint
+mechanism seems to reliably honor nn whenever it's a plain free
+register in every construction tried: array assignment, pointer-deref
+assignment, under register pressure). Same epistemic status as several
+already-landed 7c fixes this session. Independently present in
+compilers/8c/cgen.c:~135,154 and compilers/8ck/cgen.c -- port to all
+three together if landing this
+
+**** fix OFUNC not stripping a leading comma from the callee
+claude:
+compilers/6c/cgen.c:882 is missing `l = uncomma(l);` at the top of the
+OFUNC case, unlike vc, 8c, 8ck and 7c (all of which already have this
+exact call, see e.g. compilers/vc/cgen.c:284) -- 6c is the odd one
+out. A callee reached through a comma expression, e.g.
+`(sideeffect(), fp)(args)`, would hit `diag(n, "bad function call")`
+or miscompile. Same status as the already-landed vc fix (see
+plan9front.txt's mips section): proven correct by 4 sibling backends
+now, but a quick `(g(), fp)()`-style probe didn't visibly discriminate
+within budget on 6c either
+
+**** LATER add missing SSE3/SSE4.1 mnemonics
+claude:
+9front's 6a/include/6.out.h/6l support JMPF, MOVQL, HADDPD/HADDPS,
+ADDSUBPD/ADDSUBPS, HSUBPD/HSUBPS, ROUNDSD/ROUNDSS/ROUNDPD/ROUNDPS,
+DPPD/DPPS -- goken has none of these (no enum entries, no 6a mnemonic-
+table rows, no linkers/6l/optab.c rows). Real missing feature, not a
+bug fix; needs coordinated additions across three files. Note 9cc
+itself is actually a superset of both (full AVX/VEX + Y-register
+support) that neither 9front nor goken carry -- goken's 6a currently
+matches plan9foundation's simpler baseline, a deliberate choice per
+changes.txt, not an oversight; low priority
+
+*** 6l (linker)
+
+**** RELAX autoffset negative-frame clamp is incomplete
+claude:
+linkers/6l/pass.c:510-511 clamps the local `autoffset` to 0 when
+negative, but not `p->to.offset` itself, which some downstream reads
+(current-frame tracking, AADJSP sizing) still see as negative. 9front
+also clamps `p->to.offset = 0`. Low-impact edge case, only reachable
+via a hand-written negative `TEXT ...,$-N` frame directive -- not
+something real C source produces
+
+*** cross-cutting (applies to 6a/6c/6l too, not new findings)
+claude:
+several TODOs already tracked elsewhere (mips section above, and
+Last1/Last2 below) were reconfirmed as applicable here too, extending
+their scope rather than being new items: the growable regopt() NRGN
+region array, the ".ret" register-tracking carve-out, sprint() ->
+snprint() unbounded-buffer cleanup, and especially the nodrat
+(struct-copy scratch temp) non-reentrancy bug -- compilers/6c/gc.h:147,
+150,157 confirms 6c shares the exact same nodrat/nrathole/symrathole
+global-temp pattern as every other backend (5c/5ck/7c/8c/8ck/ic/vc),
+so this bug is genuinely tree-wide, not mips-specific as originally
+scoped; worth raising its priority given how universal it is
+
 * Last
 
 ** Last2
 
-*** incorportate plan9port libmach so can get acid to work on Linux
-DWARF binaries!
-
 *** pcc: improve -lxxx to look for libxxx.a in -L given path
 so then I can use more -lunix in xix mkconfig
-
-*** goken iwp9.nw refinments until March 9
-fix float
-start libos (thin syscalls wrappers)
-test support macOS 10.6
-add windows? too complex?
-talk about QEMU testing infra
 
 *** why order of -I matters?
 this does not work:
@@ -95,38 +844,18 @@ see comment in configure:
 at the same time nice to see explicitely the build-mk.sh in Dockerfile
 for iwp9 goken paper
 
-*** -----------------------------------------------------------
-
-*** undo changes to va/vc/vl, restore old code
-then add back elf, -X, and some long->int32 that are needed
-according to what we did for 5c/8c
-
-works better tests/c/mini2/ ? works better with -m32 on thinkstation?
-diff .v produced?
-
-*** undo changes to ia/ic/il
-*** undo changes to 7a/7c/7l
+*** add back -X to vc, ic, 7c? and also 5c/8c?
+or update to -O0 better
 
 ** Last1
 
-*** continue switch to kencc code in goken
-
-**** RELAX 5l/8l: cleanup the code like I did before with the '9',
-the many dead -H xxx
-
-**** RELAX add back -X to disable opti in 5c/8c
-and try it on principia? still works?
-
-**** use cc/ from kencc/plan9 instead of cc/ from golang cc/ for mips, arm64, riscv?
-solves some of the weird behavior I get? for mips? for riscv? for arm64?
-
 *** other goken PBS:
 
-**** principia x goken x macos: compilation error "out of memory" on libsec/aes.c :(
+**** still? principia x goken x macos: compilation error "out of memory" on libsec/aes.c :(
 
 ***** WAITING run qemu with mkconfig.pc on clang and macos
 
-**** principia x goken x thinkstation: pb mk nuke and bug in free() in rc
+**** still? principia x goken x thinkstation: pb mk nuke and bug in free() in rc
 weird pbs when running 'mk nuke'
 free(): invalid size
 
@@ -135,23 +864,6 @@ seems to be pb with 'rc' because export MKSHELL=/opt/plan9/bin/rc
 fixed the issue
 
 does not have the problem in docker
-
-**** mini2 x mips: pb for boolean showing false instead of true
-can debug the code?
-use cc_/ instead of cc/ ? better?
-
-**** mini2 x arm__: -DDEBUG fails why?
-happens with arm ?
-
-**** mini2 x arm__: even with qemu-armhf I get some weird output for some floats
-like 0.3333, or 20.0 that gets output as a super high float value, weird
-
-2.2 is printed as -2.4+344/e-185
-
-try kencc on it?
-compare binary output? compare -S
-
-seems to have same pb with arm arch :(
 
 *** bug: why mk pdf in principia/linkers does not do the full
 recipe and does not mv to generate Linker-7.pdf?
@@ -172,59 +884,1055 @@ pass length each time, safer
 
 * Components
 
-** ARM (kencc-imported) toolchain: 5a/5c/5l
+** C compilers: 5c/6c/7c/8c/vc/ic/ec
 
-*** still pbs on tests/c/float :( like for 5l__
-weird float displayed
+*** DONE (staged) migrate 7c/vc/ic off the Go-era src/cmd/cc frontend
+    5c/8c already build against compilers/cc/cc.a (the newer, actively
+    maintained frontend); 7c/vc/ic used to build against src/cmd/cc/cc.a,
+    a separate, older copy that had independently drifted (see the
+    com64.c OCOND/OLIST fix in
+    docs/claude_notes/notes_shared_frontend_bugs.txt, found while
+    building lib_core/libc for mips -- already fixed in compilers/cc/
+    but not in src/cmd/cc/, since they're not the same file).
 
-*** less: fix 5a to accept unicode like 5a_ and 5a__
-TEXT ·getcallerpc(SB), $-4
+    All three now build against compilers/cck/ instead -- staged there
+    rather than jumping straight to compilers/cc/: compilers/cc/cc.h
+    has diverged far more from src/cmd/cc/cc.h than compilers/cck/cc.h
+    has (1776-line vs 655-line diff at the time this was checked) --
+    compilers/cc/ renamed/retyped struct fields (Node.garb ->
+    nodegarb, uchar -> char/bool, EXTERN-macro globals moved to a
+    dedicated globals2.c) while compilers/cck/ kept the same
+    EXTERN-macro-in-gc.h convention and field names src/cmd/cc/ and
+    each backend's own gc.h already used. Migrating straight to
+    compilers/cc/ would require the same kind of gc.h/globals2.c
+    rewrite 5c/8c already went through, per backend; migrating to
+    compilers/cck/ instead was ~4 lines of type fixes per backend
+    (int32->long on outstring/gextern/exreg/ncast, xround->round
+    rename, and dropping the dead #pragma-textflag global that only
+    src/cmd/cc/ ever populated -- 5c/6c/8c had already dropped it).
+    vc's version of this was byte-for-byte the same shape as 7c's
+    (down to the matching "was before: p->reg = (profileflg ? 0 :
+    NOPROF)" comment already pointing at the fix, "//goken:" in 7c,
+    "//kengo:" in vc). ic needed one extra fix beyond the other two:
+    compilers/cck/lex.c's main() never had the argv[0]-basename check
+    (`if(*p == 'j') thechar = 'j';`, ported verbatim from
+    src/cmd/cc/lex.c, which already had it) that lets the ic/jc
+    riscv32/riscv64 dual-width binary tell which name it was invoked
+    under -- without it, jc silently produced .i-suffixed object files
+    instead of .j (found via tests/c/mini2's riscv64 build, which
+    reliably exercises this; tests/c/mini and tests/c/vlong don't have
+    riscv64 .s stubs at all, a separate, pre-existing coverage gap).
+    Also needed: ic/txt.c's riscv64 dual-width table swap
+    (`memmove(ncast, ncast64, NTYPE*sizeof(int32))`) updated to
+    sizeof(long) alongside ncast/ncast64's own int32->long, or half the
+    table would have gone uninitialized once ncast widened.
 
+    Verified for all three: clean build, and
+    tests/c/{mini,mini2,vlong,float(7c only)} + tests/c/regressions
+    pass -- 7c natively on this host (aarch64 Linux), vc under
+    qemu-mips, ic under qemu-riscv32/qemu-riscv64 (this host is
+    aarch64, not mips/riscv) -- plus, for 7c and vc, all
+    currently-wired-up benchs/compcert CompCert progs (not run for
+    ic/mips's benchs/compcert specifically: that suite has known
+    timeout/run-failure/mismatch issues across non-primary archs,
+    unrelated to this migration, so it isn't a useful signal yet).
 
-*** test infra! run hello_plan9_arm.exe on raspberry pi2 via qemu?
-need port principia to raspberry pi2 first then!
+    Correction to an earlier version of this note: src/cmd/cc/ is NOT
+    orphaned. Among compilers/{5c,6c,7c,8c,vc,ic,ck}, none reference it
+    anymore -- but src/cmd/{5c,6c,8c}/mkfile (TARG=5cg/6cg/8cg, the
+    actual go-era "ending in g" toolchains this whole policy carves an
+    exception for) still do, via `LIB=../cc/cc.a` -- a relative path
+    that resolves to src/cmd/cc/cc.a, and doesn't literally contain the
+    string "src/cmd/cc", which is why an earlier pass here (grepping
+    mkfiles for that literal string) missed it and wrongly concluded
+    src/cmd/cc/ had zero consumers left. It has exactly the consumers
+    it's supposed to have per this project's own policy: go-era "*g"
+    on src/cmd/cc/, kencc-era "*ck" on compilers/cck/, everything else
+    on compilers/cc/. No follow-up needed here -- root mkfile's DIRS
+    building src/cmd/cc/ is correct as-is, not a stale leftover.
 
-*** LATER factorize ld.a lib? imitate what I've done in principia?
-hmm but l.h change each time so can do it?
+    The eventual compilers/cck/ -> compilers/cc/ unification (needed
+    to fully match the stated end policy: only kencc-lineage "*ck"
+    compilers should live on compilers/cck/) is its own separate,
+    larger project, not done here.
 
-*** LATER: merge with principia and fix regression in principia!
-easier when will have test infra via qemu-system-arm
+*** LATER? find a genuine third optimization lever so -O2 != -O3
+    Today -O2 and -O3 are aliases (both mean "regalloc + peephole") --
+    there's only ever been two toggleable passes in this compiler.
+    Either find/add a real one (see notes_frontend_optlevels.txt) or
+    decide they should just permanently stay aliases, gcc/clang-flag-
+    compatible-shape but not distinct behavior, and remove this TODO.
 
-update: easier when goken 5a_/5c_/5l_ can work on linux
-and can compile itself on linux => that's a good test suite
+** assemblers: 5a/6a/7a/8a/va/ia/ea
 
-** hybrid ARM toolchain : 5a__/5c__/5l__
+** linkers: 5l/6l/7l/8l/vl/il/el
 
-*** last
+** mk/rc
 
-**** principia x goken x 5a__/5c__/5l__: pb dcl.c
-5c -FTVw -I../../include/arch/arm -I../../include/ALL dcl.c
-dcl.c:94 unknown vlong LIST
-dcl.c:94 unknown vlong COND
+*** DONE (mostly): self-hosting utilities/ with goken's own compiler+libc
+claude:
+The build infrastructure was already designed for this (mkfiles/amd64/
+mkfile's own header comment: "used by tests/ and, once self-hosting is
+viable, as CC/AS/LD for the top-level build too" -- $BOOTLIBS empty for
+any non-boot objtype was always the intended mechanism) but had never
+actually been exercised: every utilities/*/mkfile still only ever got
+built via objtype=boot-gcc/boot-clang (gcc + BOOT/lib9). Trying
+`mk objtype=amd64 cputype=amd64` in each utilities/ subdirectory
+instead (goken's own 6c/6l + lib_core/libc/libbio/libstring/libregexp,
+all confirmed to already self-host cleanly) surfaced a small, well-
+scoped set of real gaps, all now fixed:
 
-reduce to minimal repro case? and then try kencc on it and compare
-output?
+- waitpid() -- was declared (include/os/proc.h) but never implemented
+  on any GOOS (nothing needed it in the Tier 4 process-control round).
+  utilities/calc/misc/dc.c and utilities/pipe/*.c both need it. Unlike
+  principia's own 9sys/
+  waitpid.c (which reimplements await()'s parsing separately from
+  wait()), the new port/waitpid.c is built directly on the portable
+  wait() every GOOS already provides, so one file works for linux/
+  darwin/plan9 alike with no GOOS split of its own.
+- strncmp() -- declared (commented out) in include/base/str.h, never
+  implemented. Blocked lib_strings/libstring/s_rdinstack.c and several
+  utilities/. Ported as-is from principia's port/strncmp.c.
+- runestrlen()/runestrchr() -- both files ALREADY EXISTED in
+  lib_core/libc/utf/ (presumably from an earlier partial port) but
+  were never wired into lib_core/libc/mkfile's UTFOFILES, the same
+  "written but never wired in" shape utfrrune() hit earlier
+  (notes_libc_selfhost.txt). Just added to UTFOFILES.
+- readn() -- declared (commented out) in include/os/file.h, never
+  implemented. Blocked utilities/archive/tar/tar.c. Ported as-is from
+  principia's port/readn.c.
+- u8int/u16int/u32int/u64int -- classic Plan9 fixed-width type names,
+  distinct from (and never aliased to) this tree's own u8/u16/u32/u64
+  in every include/arch/$cputype/u.h. tar.c uses the *int spelling
+  directly; without the typedef, 6c silently treated "(u32int)EXPR" as
+  a call to a nonexistent function named u32int (an implicit-function-
+  call misparse of an unknown identifier followed by a parenthesized
+  expression) rather than a type error -- surfaced as a LINK-time
+  "undefined: u32int", not a compile error, so easy to misdiagnose as
+  something else. Added the four aliases to all 7 arch u.h files.
+- stray `#include <ctype.h>` in utilities/compare/misc/cmp.c and
+  utilities/archive/tar/tar.c -- a POSIX header this include path
+  doesn't provide (only BOOT's own -I search path happened to reach a
+  real one). Both files only used isascii()/isdigit(), already
+  available via libc.h's own str/ascii.h -- removed the include.
+- a real, previously-undiscovered `mk` quirk: `VAR=$UNASSIGNED`
+  collapses to ONE stray empty list element for VAR, unlike a bare
+  `$UNASSIGNED` referenced directly in a recipe (which correctly
+  vanishes to zero words -- the same deferred-to-rc trick
+  mkfiles/mkfile.proto's own CFLAGS_EXTRA comment already documents).
+  This broke every leaf mkfile whose ENTIRE LDLIBS was `$BOOTLIBS`
+  alone (utilities/time/mkfile -- date.c -- was the first one hit:
+  "6l ... : cannot open : No such file or directory"). Confirmed with
+  a minimal reproduction (a throwaway mkfile) before fixing, and
+  confirmed multi-word assignments like "LDLIBS=-lbio -lstring
+  $BOOTLIBS" do NOT trigger it -- only the bare, single-reference
+  case. Fixed at the root: mkfiles/mkone and mkfiles/mkmany now
+  reference $BOOTLIBS directly in their own $LD recipe line (a direct,
+  never-assigned reference, so it correctly vanishes for self-hosted
+  objtypes and still resolves for boot-gcc/boot-clang), and the
+  handful of leaf mkfiles whose LDLIBS was ONLY $BOOTLIBS (utilities/
+  time, utilities/text/awk, compilers/pcc, typesetting/{eqn,pic,grap,
+  troff}, tests/lib9) had that now-redundant line removed. Every OTHER
+  leaf mkfile (the "-lbio -lstring $BOOTLIBS" shape) was left
+  unchanged -- harmless, if slightly redundant, double-linking against
+  -l9/-lm for boot builds only, not worth touching ~50 more files for.
+  mkfile.proto's own BOOTLIBS= was also changed from an explicit empty
+  assignment to fully unassigned (matching CFLAGS_EXTRA's existing
+  pattern) -- confirmed beneficial and non-regressing for the common
+  multi-word case, even though it alone doesn't fix the bare-assignment
+  case above.
 
-better with cc_/ instead of cc/?
+Verified per-fix by actually running the built binaries under
+qemu-runner (not just linking): cat/wc/mkdir/rm real file operations,
+tar cf/xf round-tripping a real file. Full tests/c/hello_libc and
+tests/s/variants regression suites re-run clean after all of the
+above (no host-libc/toolchain-shared-file changes went untested).
 
-works with goken/kencc 5c at least! 
-but then get back compilation error about floating
-point error with linker (but maybe this one can be solved by long vs int32?)
+What's built and running now, self-hosted (goken's own 6c/6l against
+lib_core/libc, not gcc+BOOT/lib9): utilities/files/{cat,touch,mkdir,
+rm,chgrp,mtime,wc,du}, utilities/pipe/{xargs,p,mc}, utilities/compare/
+misc/{cmp,comm}, utilities/calc/misc/{dc,bc}, utilities/misc/
+{basename,unicode}, utilities/time/date, utilities/archive/tar/tar
+(archive creation verified; see below for one known-bad path).
 
-**** diff 5l kencc vs 5l__ goken in obj.c
--	case AMOVDF:
--		if(!vfp || p->from.type != D_FCONST)
--			goto casedef;
--		p->as = AMOVF;
--		/* fall through */
- 	case AMOVF:
- 		if(skip)
- 			goto casedef;
-@@ -1225,7 +1191,7 @@ gethunk(void)
+Still open, deliberately not attempted this round:
+- utilities/pipe/tee.c and tail.c need atnotify() (Plan9's
+  notification system) -- not implemented on any POSIX-shaped GOOS at
+  all yet. Would need a real signal()-to-note translation layer on
+  linux/darwin, a materially bigger task than this round's other
+  fixes, and the SAME kind of design question mk/rc's own Plan9.c-vs-
+  Posix.c notification story below needs answered anyway -- better
+  solved once, for both, not twice.
+- utilities/archive/tar/tar.c's own archive-header checksum write path
+  produced a real, reproducible "bad archive header checksum" on
+  extraction (`tar cf` a file, `tar xf` it back: "expected 3o got
+  3993o"). The suspiciously tiny "expected" value strongly suggests
+  this is a re-sighting of the ALREADY-DOCUMENTED "bare %u-as-flag"
+  fmt.c bug elsewhere in this file (a `%...o`-shaped checksum format
+  most likely hitting the exact same verb-dispatch-hijack already
+  described in this file's own "%u`-as-flag idiom mis-parses" entry
+  above) rather than a new bug in tar.c itself -- not confirmed by
+  isolating fmt.c specifically, and not fixed here, since that gap is
+  already flagged as needing either a tree-wide %u audit or a more
+  surgical dofmt.c fix, out of scope for a self-hosting survey pass.
+- utilities/text/awk/*.c was NOT attempted -- utilities/mkfile's own
+  SRC_VIEWS comment already marks it "TODO: awk must be relpized after
+  the removal use of APE in it", a pre-existing, explicitly-deferred
+  gap in the project itself, not rediscovered here.
+- utilities/files/{ls,mv,cp,chmod} are explicitly excluded from
+  utilities/files/mkfile's own TARG list already ("we skip ls, mv...
+  breaking current usage", "TODO: mv ls chmod") for reasons predating
+  this pass -- not re-investigated under objtype=amd64 specifically;
+  worth revisiting given how much else in this same file just started
+  working, but genuinely untested, not "confirmed still broken".
+- utilities/{byte,archive/gzip,archive/zip,calc/hoc,text/misc,
+  typesetting/*} and the rest of utilities/misc/{file,iconv,strings}
+  were not surveyed at all this round (time/scope), only the
+  directories that came up while chasing the specific errors above.
 
-also hintabsize set correctly? also need dbuf[1] fix?
+*** TODO: gap: compilers/cc/compat.c still uses `#if 0`/`#endif` around its own fake-malloc block
+claude:
+Same shape as the real bug found (and fixed) in linkers/7l/falloc.c and
+linkers/6l/compat.c while self-hosting the mk/rc/toolchain bootstrap
+below: goken's own compilers have no `#if` support at all (only
+`#ifdef`/`#ifndef`), so `#if 0 ... #endif` compiles fine under every
+objtype=boot-gcc/boot-clang build (real cpp) but fails outright
+("unknown #: if") the moment anything tries to self-host this file.
+NOT yet hit in practice: compilers/cc is a separate frontend from
+compilers/cck (which compilers/${LETTER}c -- 7c confirmed, others not
+yet tried -- actually links against), and isn't part of the bootstrap
+target's own BOOTSTRAPDIRS chain. Pre-existing, not introduced by any
+work in this session. Fix when compilers/cc itself is ever self-hosted:
+same treatment as the two files above, individual `//` line comments
+instead of `#if 0`.
 
-**** vfp set in 5l__ ? need -f ? for floating?
+*** DONE: self-host mk and rc themselves
+claude:
+UPDATE: mk's side of this is done -- see docs/claude_notes/
+notes_libc_selfhost.txt's "mk self-hosting, Linux fully verified +
+darwin compile/link-only" section for the full story (mk/goken.c, the
+strecpy()/getfields() libc additions, and the notify_full.c/
+notify_partial.c/notify_none.c split this actually took). Short
+version: linux/amd64 builds, links, and runs real recipes plus a real
+readenv()/exportenv() round trip under qemu; darwin/amd64 reaches
+compile+link (the usual no-host-hardware bar); windows/amd64 is
+blocked on a real architectural gap (no fork()/wait(), no environ()),
+not a small missing-function one -- needs a CreateProcess-based
+execsh()/pipecmd() redesign, not attempted yet. rc is NOT started
+(rc/unix.c doesn't even compile against this toolchain yet -- <errno.h>
+missing, plus its own Updenv() assumes a real assignable `environ`
+global, which conflicts with this tree's environ() being a function).
+The analysis below predates that work and mostly still holds for rc's
+side of the problem; mk's own side is now settled by the real code,
+not just this write-up.
+
+UPDATE 2: rc's own survey is done too (same "attempt a real build,
+collect real errors" method) -- see notes_libc_selfhost.txt's "rc
+self-hosting survey" section. One real bug found and fixed along the
+way (rc.h's __LOC__ macro needs __LINE__/__FILE__/stringize, none of
+which goken's compilers implement -- simplified to a static
+placeholder, safe on the host gcc build too since it's cosmetic debug
+output only). With that fixed, everything in rc/mkfile's OFILES
+compiles against goken's own 6c except unix.c itself (real glibc,
+<errno.h>, same shape as mk/Posix.c). rc/plan9.c, unlike mk/Plan9.c,
+is current and mostly portable already -- Vinit()/addenv()/Updenv()
+(the /env-based env sync) and notifyf()/Trapinit() (notify()/noted())
+are the only genuinely Plan9-specific pieces, the same split mk's own
+readenv/exportenv and notifyf/catchnotes had. One NEW gap mk never
+hit: Isatty() needs fd2path(), a real Plan9 syscall with zero POSIX
+implementation -- rc/goken.c would need a genuinely new isatty()-style
+libc primitive, not a port of an existing principia/lib9 file. Writing
+rc/goken.c itself, wiring rc/mkfile's OFILES the same three-way way
+mk/mkfile's VARIANTOFILES got, and rc's own notify_full/partial/none
+split are all still TODO.
+
+UPDATE 3: done, and runtime-verified on linux/amd64 -- see
+notes_libc_selfhost.txt's "rc self-hosting, DONE and runtime-verified
+on Linux/amd64" section. rc/goken.c written (mk/goken.c's own shape:
+reuse whichever of unix.c/plan9.c is already portable, rewrite only the
+genuinely GOOS-specific pieces); new libc primitives added along the
+way (isatty() -- a real ioctl(TCGETS) probe, all 7 arches' SYS_ioctl
+numbers; strstr(); wired utfutf() into the build, which surfaced and
+fixed the same "macro redefined: nelem/nil" bug utfrune.c's own header
+comment already had on record; an rfork()->fork() shim scoped to
+rc/goken.c itself rather than editing the shared processes.c call
+site). Also found and fixed a real, NOT rc-specific bug while
+verifying: port/getenv.c's environ() used to scan _mainargv for envp,
+which broke silently once any argv-mutating flag parser (getflags(), a
+completely ordinary one) ran first -- fixed by having rt0.s capture
+argc directly too (_mainargc, all 9 rt0*.s files) and computing envp
+without scanning. darwin/windows compile+link verification for rc
+itself (matching mk's own darwin/windows status) is the remaining
+open item.
+
+UPDATE 4: darwin done too, both amd64 and arm64, compile+link verified
+(real Mach-O binaries) -- see notes_libc_selfhost.txt's "rc
+self-hosting on darwin" section. Needed two genuinely new darwin libc
+primitives neither mk nor anything else in this tree had ever hit:
+isatty() (ioctl(TIOCGETA,...), the numeric request code derived from
+real Darwin headers) and dirread()/dirreadall() (getdirentries64 +
+per-entry dirfstat(), the same "just get the name, reuse the
+already-working stat path" trick os/linux/stat_amd64.c's own
+dirreadbuf() already uses, adapted for Darwin having no openat()
+family at all). windows is now the only remaining gap for rc, same
+CreateProcess-based redesign mk's own windows gap needs.
+
+UPDATE 5: windows done too, both mk and rc, compile+link verified
+(real PE32+ binaries) -- see notes_libc_selfhost.txt's "mk and rc on
+windows, compile+link verified via a new portable spawn()" section.
+This was the one gap in the whole mk/rc self-hosting effort that
+needed a genuinely new, general libc primitive rather than porting an
+existing one: spawn() (include/os/proc.h, docs/claude_notes/
+notes_libc_api_design.txt's own "spawn(): a portable process-spawn
+primitive" section), the same convergent "atomic spawn with fd
+redirection, no bare fork() exposed" design POSIX's posix_spawn(),
+libuv's uv_spawn(), Rust's Command::spawn() and others already
+settled on for the identical reason: Windows never had fork() at all.
+mk/goken.c's execsh()/pipecmd() now build on it (mk/exec_windows.c);
+rc's own Xasync()/Xpipe() genuinely cannot (they duplicate the RUNNING
+INTERPRETER, not start a new program -- rc/rfork_windows.c and the new
+os/windows/fork.c return a real, documented -1, which is the same
+"try again" failure path a real rfork()/fork() failure already takes,
+not a crash). Three more real windows libc gaps found and fixed along
+the way: isatty() (GetConsoleMode), dirread()/dirreadall()
+(FindFirstFileA/FindNextFileA + GetFinalPathNameByHandleA), and a
+real-but-scoped dup() (DuplicateHandle+SetStdHandle, fd targets 0/1/2
+only -- the general case still needs the fd-table this project's own
+windows dup() gap already called for). mk/rc self-hosting is now
+complete to the compile+link bar on all three GOOSes this tree
+targets (linux fully runtime-verified, darwin and windows compile+link
+only, no host hardware for either here).
+
+UPDATE 6: darwin/arm64 now runtime-verified too, both mk and rc, real
+recipe/command execution on actual macOS/arm64 hardware -- the first
+time this tree had real macOS hardware to test on (every darwin round
+above was compile+link only). See notes_libc_selfhost.txt's own
+"darwin/arm64 runtime verification" section for the three real
+toolchain bugs this surfaced and fixed (linkers/7l's and 6l's gethunk()/
+sbrk() OOM crash, and 7l's addpool() missing C_LACON case) and the two
+apparent-but-not-real bugs it also chased down (rc's own %r verb is
+errstr()-based, not strerror()-based, and legitimately empty given this
+libc's syscall layer never calls werrstr(); and rc's searchpath()
+correctly requires an explicit "./" prefix on a relative dot-source
+argument, same as any other Plan9 rc). mk/rc self-hosting is now
+runtime-verified on linux/amd64 AND darwin/{amd64,arm64}; windows
+remains compile+link only (no host hardware here).
+Real design work, not mechanical porting like utilities/ above turned
+out to be. mk/mkfile currently only ever builds mk/Posix.c ("Posix.$O
+below not Plan9.$O!"), which wants genuinely POSIX-shaped primitives
+this libc does not have and was never asked to have: `int wait(int*)`
+(conflicts with our own Plan9-shaped `Waitmsg* wait(void)` -- the file
+even says so itself, "#define NOPLAN9DEFINES // to avoid conflict for
+wait(), waitpid() signatures"), dup2(), kill(), signal(), a real
+`environ` global (port/getenv.c's own _mainargv-based walk only
+answers single-name lookups, not "give me everything"), tmpnam(),
+utime(). rc/unix.c likely wants a similar but not identical set (its
+own mkfile note: "-lstring is needed just for one function in
+processes.c (for `{...})", and rc/processes.c uses
+rfork(RFFDG|RFPROC|RFNOTEG), a richer rfork() invocation than
+port/fork.c's own fixed RFPROC|RFFDG|RFREND -- not reducible to a
+simple fork() call the way pcc.c's usage was).
+
+mk/Plan9.c, by contrast, is ALREADY almost entirely compatible with
+this libc as it stands today: rfork(RFPROC|RFFDG|RFENVG), fork(),
+pipe(), execl(), dup(in[0], STDIN) (matches our dup(oldfd,newfd)
+exactly, not POSIX dup2), Waitmsg* wait(), dirstat()/dirwstat()/
+nulldir()/access()/create() -- all already implemented and working.
+The ONLY genuinely Plan9-specific pieces are readenv()/exportenv()
+(open("/env",OREAD)+dirread(), meaningless on a GOOS without /env) and
+atnotify()/postnote()/notify() (same gap as utilities/pipe/tee.c's
+atnotify need above) plus waitpid() (now implemented, see the DONE
+entry above -- mk/Plan9.c's own Exit() already calls it).
+
+This suggests the right shape for self-hosting mk (and by extension
+rc, which needs the same rfork/notify story) on Linux is NOT "make
+Posix.c work against this libc" (would require growing the libc
+toward genuine POSIX compatibility -- dup2/kill/signal/environ/tmpnam/
+utime -- duplicating machinery Plan9.c's own rfork/fork/pipe/dup/wait
+usage already gets for free) but rather a THIRD variant file (e.g.
+mk/GokenLinux.c) that reuses Plan9.c's process-control code nearly
+verbatim and only replaces its two genuinely Plan9-specific pieces:
+readenv()/exportenv() via environ-walking (needs libc to expose
+something like port/getenv.c's environ() -- currently file-static --
+as a real enumerable-environment primitive, not just single-name
+getenv()) and catchnotes()/expunge() via signal()/kill() (needs both
+implemented -- a smaller, more self-contained POSIX-compat addition
+than the full Posix.c wishlist, and arguably useful on its own
+regardless of mk).
+
+Not started. Real open questions before writing code: does
+port/getenv.c's environ() get promoted to a public, non-static
+primitive (and under what name, given Plan9 has no "environ" concept
+at all to name it after)? Does signal()/kill() belong in libc as
+genuine POSIX-compat additions (a first for this tree, which has
+avoided POSIX signals entirely so far in favor of Plan9's own
+note-based model), or does catchnotes() get a Linux-specific atnotify-
+over-signal shim instead, keeping libc's own public API Plan9-shaped
+throughout? Whichever way mk goes, rc/processes.c's own richer
+rfork(RFFDG|RFPROC|RFNOTEG) needs checking against what real
+rfork(2)/our rfork() can actually honor before assuming it just works
+by analogy to mk's simpler case.
+
+*** DONE: `mk bootstrap` -- the full three-stage self-bootstrap, fixpoint reached (linux/arm64)
+claude:
+The mkfile's own `bootstrap` target now runs end to end on a
+linux/arm64 host and `bootstrap-compare` reports "Fixpoint reached":
+stage 3's binaries AND libraries are byte-identical to stage 2's, so
+goken's 7c/7a/7l/iar/mk/rc reproduce themselves exactly with the host
+gcc entirely out of the picture. Full write-up in docs/claude_notes/
+notes_libc_selfhost.txt's "the three-stage bootstrap, fixpoint reached
+on linux/arm64" section; the mkfile's own header comment carries the
+stage-by-stage description.
+
+Stage 1 needed no source changes at all to move from the macOS/arm64
+host it was developed on to this one -- the arch-letter and $ostype
+keying really did travel. Everything below was found in stages 2 and 3,
+which had never been attempted anywhere before.
+
+Three real bugs outside the build system, all portable code that
+applies to darwin/windows equally:
+- lib_core/libc/port/exec.c walked port/mainargs.c's _mainargv itself
+  instead of calling environ(), so it was blind to port/putenv.c's
+  fresh array: every putenv() a process made was dropped at exec().
+  It also used the scan-for-argv's-nil trick that _mainargc was
+  introduced to replace.
+- port/putenv.c never wrote the nil terminator on the
+  replace-an-existing-variable path (the append path was fine).
+  Latent while exec.c bypassed environ(); immediately fatal after.
+- mk/goken.c's exportenv() joined multi-word values with a space
+  rather than Posix.c's IWS ('\1', which is rc's own SEP), so a
+  recipe's $CFLAGS arrived at 7c as ONE argv entry -- the compiler
+  then tried to open an include directory literally named
+  "-I../../include/ALL". mk and rc have to agree on that separator.
+
+Five fixes to the bootstrap recipe itself (each documented at its own
+site in the mkfile): `~ $status ''` never matched because MKSHELL is
+the rc/unix.c build, whose $status is "0" not ""; rc has no `break`
+at all, so the retry loop's early exit was a command-not-found waiting
+to happen; `PATH=(list)` exported a SEP-joined single word that broke
+every child's PATH; mk runs recipes under `rc -e` and rc's -e checks
+only top-level commands, so a leftover "false" status from an if()
+that didn't fire silently aborted the whole target between stages; and
+nothing in the build system makes a tool binary depend on libc.a, so a
+rebuilt libc never reached an already-up-to-date tool. The macOS
+AV-quarantine retry loop was removed rather than fixed, at the user's
+call -- the right next step there is to find that race's actual root
+cause on a macOS host, not to keep a blind retry that (because of the
+$status bug) always ran to exhaustion and then continued anyway.
+
+Two build-system fixes the three-stage run forced out, both with
+existing precedent in this tree:
+- compilers/cck's intermediate archive was a bare `cc.a`, shared by
+  every objtype; compilers/cc/mkfile already used `cc.a$O`. After a
+  bootstrap left an arm64 cc.a there, a plain `mk install` fed it to
+  the host ld ("cc.a:1: syntax error") and mk saw the newer archive as
+  up to date. Now `cc.a$O` in cck and its seven consumers.
+- mkfiles/mklib and mkfiles/mksyslib now `rm -f` the archive before
+  running $AR, so it is always built fresh. ar's `r` key MERGES, and
+  $prereq is the complete $OFILES list, so merging was never wanted --
+  it is the same shape as the "ar: phase error" from a stale
+  build-mk.sh archive already on record.
+
+Also new: mkfiles/mkfile.proto grew ARFLAGS (default "rc"), so the
+bootstrap can pass ARFLAGS=rcD and get deterministic archives from
+iar (linkers/ar/ar.c's Dflag). That is what let bootstrap-compare
+extend from bin/* to lib/*.a; the old comment there guessed archives
+"may not be byte-reproducible" and the guess is now measured -- plain
+`iar rc` differs across rebuilds, `iar rcD` does not.
+
+Not done: darwin/arm64 and windows have not had stages 2/3 attempted.
+Worth re-running on the MacBook now that the three libc/mk bugs above
+are fixed, since none of them were host-specific.
+
+** libs
+
+*** libsyscall
+
+**** gap: 5i/vi cannot serve plan9's synthetic device files
+claude:
+plan9's getpid() and nsec() are FILE READS on that GOOS, not syscalls --
+"#c/pid" and "/dev/bintime" (see lib_core/libc/os/plan9/{getpid,time}.c,
+ported from principia). That is correct for real Plan9, and is exactly
+why plan_syscalls.txt predicted Plan9 needs far fewer syscalls than the
+Unix column suggests.
+
+But machines/5i and machines/vi forward open() straight to the host
+(machines/5i/syscall_posix.c's sysopen calls the host open()), and a
+Linux host has neither file. So under the emulators getpid() returns 0
+and nsec() returns 0, and tests/c/hello_libc/proc.c's first check fails.
+proc.c is therefore built for plan9 but not RUN in that mkfile's
+test_plan9 target -- getwd() and sleep() there do work, since FD2PATH
+and SLEEP are already implemented in both emulators.
+
+The fix is a small synthetic-device layer in each emulator: intercept
+open() of a known device path, hand back a synthetic fd, and serve its
+contents from the host on read (getpid() -> the host's own pid,
+/dev/bintime -> the host clock as 8 big-endian nanosecond bytes). Maybe
+60 lines per emulator, and it would make the plan9 target genuinely
+testable rather than merely compiled. Worth doing before the stat or
+process-control tiers, both of which will want more of /dev.
+
+**** gap: 5i/vi don't actually serve ALARM (still "No system call" stubs)
+claude:
+alarm() now exists in lib_core/libc for all four GOOSes, and on plan9
+it is a direct syscall (syscall/os/plan9/svc_{arm,mips}.s, using sys.h's
+own ALARM=24 which was already defined and unused). Correct on the
+guest side and confirmed to compile+link for plan9/arm and plan9/mips.
+But machines/5i/syscall.c's sysalarm() and machines/vi/syscall.c's are
+both "No system call" stubs that Bprint and exits(0) the whole emulator,
+so a -H2 binary calling alarm() dies there even though it would work on
+real hardware -- same shape as the FSTAT/STAT gap below.
+
+Worth noting this one is bigger than a marshalling fix: unlike stat,
+serving ALARM means the emulator needs a notion of elapsed time in the
+interpreter loop AND a way to deliver a note to the guest, and note
+delivery is itself already a documented 5i/vi gap (notes_libc_selfhost's
+own Tier 6 entry -- which is why tests/c/hello_libc/notify.c is
+linux-only). So the two want doing together, and the alarm half is
+useless without the note half. tests/c/hello_libc/alarm.c is
+deliberately linux-only for exactly this reason, matching notify.c
+next door.
+
+**** gap: 5i/vi don't actually serve FSTAT/STAT (still TODO stubs)
+claude:
+Tier 3 (docs/claude_notes/plan_syscalls.txt, notes_libc_selfhost.txt)
+landed lib_core/libc's dirfstat()/dirfwstat() for plan9/arm+mips
+(os/plan9/stat.c, convM2D.c, convD2M.c) -- correct on the guest side,
+confirmed by reaching the syscall boundary cleanly under 5i/vi. But
+machines/5i/vi's own sysstat()/sysfstat() (syscall_posix.c) are
+themselves unfinished: both just Bprint "TODO stat()/fstat() system
+call" and exits(0) the WHOLE EMULATOR the first time a guest program
+calls either. tests/c/hello_libc/stat_plan9_{arm,mips}.exe are built by
+test_plan9 but, like proc.exe/env.exe above, deliberately not asserted
+against -- same "kept compiled, not yet runnable end to end" shape as
+the getpid/nsec gap just above, and worth fixing together with it since
+both need the same kind of host-fd -> Dir -> wire-format-buffer bridge
+(the getpid/nsec gap needs synthetic device *reads*; this one needs a
+real stat/fstat *answer*, which means teaching the emulator to marshal
+a host stat() result through convD2M so the guest's own convM2D can
+unpack it -- there is no ready-made 3-argument Plan9-shaped fstat() on
+the host to call directly; BOOT/lib9 only has the Dir*-returning
+dirfstat(), no raw wire-buffer form).
+
+While adding this test, machines/5i/syscall_posix.c's sysstat()/
+sysfstat() were ALSO found to SEGFAULT the emulator process outright
+(not just print TODO and exit) -- an unrelated, already-fixed bug: a
+debug Bprint indexed sysctab[reg.r[REGARG]] after the same function had
+already overwritten reg.r[REGRET] (REGARG and REGRET are the same ARM
+register, arm.h), landing on sysctab[0xffffffff]. Fixed to fail cleanly
+instead; see notes_libc_selfhost.txt's stat-family section and
+notes_debug_techniques.txt's gdb-under-5i section for how it was found.
+That fix does NOT close this gap -- FSTAT/STAT are still unserved,
+just no longer crash-on-touch.
+
+**** gap: no dup() on windows (needs an fd -> HANDLE table first)
+claude:
+access/dup finished Tier 2 of docs/claude_notes/plan_syscalls.txt on
+every GOOS except this one, where dup() is deliberately absent rather
+than approximated. The blocker is the simplification
+lib_core/libc/os/windows/open.c's own header comment already documents:
+fdt is `int` but a real Win32 HANDLE is an 8-byte pointer, so open()
+truncates it and the other calls widen it back. That works only because
+CreateFileA happens to return small handle values.
+
+dup() is the first call that cannot live with it. Plan9's
+dup(oldfd, newfd) must place a descriptor at a number the CALLER
+chooses -- that is the whole point of the newfd argument, and what
+every shell redirection needs. A HANDLE-as-fd model has no way to
+express "make this copy be number 9": DuplicateHandle returns whatever
+handle the kernel picks, and nothing maps that back to 9.
+
+So the fix is the fd table that open.c already names as the real
+solution: a small array mapping int fds to HANDLEs, with open/create
+allocating the lowest free slot, close freeing it, and read/write/seek
+indirecting through it. dup then becomes trivial (copy the slot, or
+DuplicateHandle into a chosen slot). Until then
+tests/c/hello_libc/fd.c is not built for windows -- see that file's
+comment and this mkfile's test_windows target, which lists its
+binaries explicitly rather than using `all`.
+
+access() IS implemented for windows (GetFileAttributesA), but only
+approximately: it can answer existence and the read-only bit, not AREAD
+or AEXEC, since Win32 permissions are ACLs rather than mode bits.
+
+UPDATE: the scoped fix predicted above is now real -- os/windows/dup.c
+(rc self-hosting on windows, notes_libc_selfhost.txt's "mk and rc on
+windows" section), DuplicateHandle+SetStdHandle. NOT the general
+fd-table fix this entry describes -- exactly the fd 0/1/2 targets
+rc/simple.c's own doredir() actually needs, anything else still
+returns -1. tests/c/hello_libc/fd.c's own general case is unaffected
+and still not built for windows; the general fd-table redesign is
+still the right eventual fix if a caller needing arbitrary dup targets
+ever shows up.
+
+**** gap: dirread()/dirreadall() not implemented for darwin/windows
+claude:
+Tier 3.5 (docs/claude_notes/plan_syscalls.txt, notes_libc_selfhost.txt)
+landed dirread()/dirreadall() for linux (getdents64 + openat per entry,
+all 6 arches except riscv32) and plan9 (native read()-of-a-directory +
+convM2D, ported near-verbatim from principia's lib_core/libc/9sys/
+dirread.c). Darwin and windows were deliberately deferred, not
+forgotten: both are unverifiable by execution here anyway (no host),
+and each needs real new work rather than a small extension --
+darwin needs the BSD getdirentries64 syscall (a different shape from
+Linux's getdents64, its own number/struct), windows needs
+FindFirstFileA/FindNextFileA stubs added to winio_amd64.s plus new
+linkers/lk/pe.c importfuncs[] entries (same "no relocation pass, must
+be listed before it'll link" story every windows call already hits).
+Until then, utilities/files/ls.c (see below) only runs self-hosted on
+linux; darwin/windows os/$GOOS/ get no dirread.c at all, so anything
+that needs one fails to link there -- same shape of gap as riscv32's
+missing stat file.
+
+UPDATE: both landed, exactly the shape predicted above -- rc self-
+hosting needed both (rc/goken.c's own Opendir()/Readdir()), see
+notes_libc_selfhost.txt's "rc self-hosting on darwin" and "mk and rc
+on windows" sections for os/darwin/dirread.c (getdirentries64) and
+os/windows/dirread.c (FindFirstFileA/FindNextFileA +
+GetFinalPathNameByHandleA, since Win32 enumerates by path pattern, not
+handle) respectively. windows' own version does not distinguish
+dirread() from dirreadall() at all (no per-call batch boundary the way
+getdents64 has) -- always enumerates the whole directory in one call,
+confirmed harmless for every caller in this tree today. Side effect
+worth checking next time ls.c comes up: utilities/files/ls.c should
+now be able to LINK on darwin/windows too, not just compile -- not
+re-verified here, this round's own verification was scoped to rc.
+
+**** DONE: utfrrune() wiring, plus strrchr()/strncpy()/dirmodefmt() -- ls.c now works
+claude:
+Found while retrying utilities/files/ls.c after this session's ctime()
+work (docs/claude_notes/notes_libc_selfhost.txt) let it compile: ls.c's
+xcleanname() calls utfrrune() (include/utf/utf.h), implemented
+(lib_core/libc/utf/utfrrune.c) but never added to UTFOFILES, and using
+a Go-era const/Rune signature calling a nonexistent strrchr(). All
+fixed (utfrrune.c replaced with a plain copy of principia's port/
+utfrrune.c per this session's own instruction, strrchr.c/strncpy.c
+added as plain copies of principia's, dirmodefmt.c likewise for the
+%M fmt verb ls -l needs) -- see notes_libc_selfhost.txt's own
+"utfrrune()/strrchr()/strncpy()/atexit()/dirmodefmt()" section for the
+full story, including a real vararg-desync segfault dirmodefmt's
+absence caused. ls.c now compiles, links, and runs correctly,
+including -l.
+
+**** DONE: atexit() -- was declared (include/os/proc.h) but not implemented
+claude:
+Found via ls.c: Binit() (ls.c's Biobuf setup) reaches
+lib_core/libbio/binit.c's install(), which calls atexit() -- grepped
+for a definition the same way gmtime()/ctime() were checked earlier
+this session, and found none. Implemented (port/atexit.c, a plain
+copy of principia's lib_core/libc/port/atexit.c's onex[]/atexit(),
+minus its own exits() -- see port/exits.c's updated header comment for
+why: this tree already had its own exits(), collapsed onto exit(int)
+per-GOOS, so atexit.c exposes atexitrun() as the seam instead of
+redefining exits() a second time).
+
+**** gap: atexit() callbacks never run on plan9 (exits() is a raw syscall there)
+claude:
+Found by actually running tests/c/hello_libc/atexit.exe under 5i, not
+assumed: os/plan9/_exits.$O IS this GOOS's exits(char*) (a raw EXITS
+syscall trampoline, lib_core/libc/mkfile's EXITSOFILES), so it never
+calls port/atexit.c's atexitrun() the way port/exits.c's exits() does
+on every other GOOS -- atexit()-registered callbacks are simply
+inert on plan9, not blocked by an emulator gap the way stat.exe/
+dirread.exe's FSTAT gap is. tests/c/hello_libc/mkfile's
+atexit_plan9_{arm,mips}.exe targets are build-only (not run) for this
+reason, matching stat.exe/proc.exe/env.exe's own precedent. Real fix
+needs os/plan9/_exits.s (or a thin _exits.c wrapper) to call
+atexitrun() before the EXITS syscall, mirroring real Plan9's own
+lib9/atexit.c (which defines exits() itself, calling onex[] directly,
+sidestepping this split entirely -- see port/atexit.c's own comment).
+
+**** gap: bare `%u`-as-flag idiom (`%llud`, `%lux`, `%.7luo`, ...) mis-parses -- not just cosmetic
+claude:
+Found while verifying utilities/files/wc.c: `%7llud` (Plan9's own
+"length modifiers then verb" idiom, used throughout ls.c/wc.c/mv.c/
+utilities/byte/{dd,xd}.c/utilities/time/cal.c etc, all ported from
+real Plan9 sources) printed the number correctly but then a literal
+trailing 'd', e.g. "42d" instead of "42" -- also present (previously
+unnoticed) in ls -l's dev/length columns and cal's day numbers. Root
+cause isolated to lib_core/libc/fmt/fmt.c's own verb table
+(`knownfmt[]`): it has a genuine upstream `#ifdef PLAN9PORT ... #else
+'u', __ifmt ... #endif` switch for the character 'u' -- PLAN9PORT mode
+treats 'u' as a FLAG (like 'l'/'h') meaning "the verb that follows is
+unsigned", matching `%lld`/`%llud`; non-PLAN9PORT (ANSI C) mode treats
+bare 'u' as its OWN terminal verb ("print an unsigned int in decimal"
+right there). `PLAN9PORT` is never `#define`d anywhere in this tree
+(grepped, not assumed), so it's silently in ANSI mode -- meaning
+`%llud` parses as: __ifmt('u') consumes the arg, prints it in decimal,
+and returns; the trailing 'd' is then just ordinary un-consumed
+literal text the outer dofmt() loop copies through verbatim. Explains
+the exact "number, then stray d" symptom precisely.
+
+WORSE than cosmetic when the intended verb ISN'T 'd': found via
+utilities/byte/xd.c, whose default hex-dump format is `%.7lux ` (7-digit
+zero-padded hex address) -- 'u' hijacks the verb dispatch before 'x'
+is ever reached, so the value prints in DECIMAL (with the '.7'
+precision still applied) instead of hex, and 'x '  becomes literal
+trailing text. `xd`'ing "AB" produced "0000000x  1094844416x" instead
+of a proper hex/address dump -- 1094844416 being 0x41420000
+(0x41='A', 0x42='B', shifted into a default 4-byte word) printed as a
+raw decimal, not a formatting artifact. Any `%...u{x,o,b}`-shaped call
+(not just `%...ud`) silently produces the WRONG VALUE in the WRONG
+BASE, not just extra text -- raises the severity of this gap
+noticeably above the original "stray d" framing.
+
+NOT fixed here: naively defining PLAN9PORT (or just re-registering 'u'
+to `__flagfmt` in the `knownfmt[]` table) is NOT safe globally --
+lib_toolchain/libmach/5db.c's own ARM disassembler mnemonic templates
+(`"MOV%u%C%p"` etc, `bprint()` -> `vseprint()` -> this same fmt
+engine) rely on bare `%u` terminating as its own verb the way it
+already does; flipping global 'u' semantics would silently corrupt
+disassembly output there while fixing ls.c/wc.c/mv.c. A real fix needs
+either auditing every `%u`-using call site tree-wide first, or a more
+surgical dofmt.c change (peek at the character right after 'u' and
+only treat it as a flag when a length-modifier-shaped verb -- d/x/o/b/
+i -- immediately follows) -- out of scope for what was meant to be a
+"simple, useful for utilities/files" pass.
+
+**** gap: most Plan9-shaped syscall wrappers return the raw negative errno on failure, not -1
+claude:
+Found via utilities/files/rm.c: `remove(f) != ERROR_NEG1` (ERROR_NEG1
+is literally `(-1)`) took the SUCCESS branch after `rm
+nonexistent-file`, silently exiting 0 with no error printed. Root
+cause: port/remove.c returned whatever _sysrmdir() gave back on
+failure -- the raw negative Linux errno (-2 for ENOENT, -13 for
+EACCES, ...), not -1. Real Plan9 syscalls always fail with EXACTLY -1
+(the failure detail is conveyed separately, via errstr()) -- every
+Plan9-shaped API in include/os/*.h (open(), remove(), create(), ...)
+is documented/expected to honor that same contract, and code ported
+verbatim from real Plan9 sources (rm.c, mv.c) checks failure with an
+exact `== -1`/`ERROR_NEG1` comparison specifically because of it, not
+just `< 0`.
+
+Fixed ONLY for remove() (port/remove.c) -- the one call this session's
+utilities/files work actually exercised with an exact -1 check
+(rm.c/mv.c both use it). The SAME gap almost certainly exists in every
+other os/$GOOS/*.c Plan9-shaped wrapper across every arch --
+os/linux/open.c's own open()/create() are a confirmed instance (traced
+while diagnosing remove(), not fixed: `return (fdt)_sysopen(...)`
+returns the raw negative errno directly, no -1 normalization at all).
+A full fix means auditing/normalizing every os/$GOOS/*.c file's
+Plan9-shaped entry points (not the raw syscall/ wrappers themselves,
+which should keep returning the real errno for anything that DOES
+want it, e.g. future errno-bridging work) -- out of scope for what
+was meant to be a small, targeted utilities/files fix.
+
+Directly connects to port/errstr.c's own already-documented gap ("no
+caller in this tree currently reports failures via werrstr()"): even
+after the -1 fix above, `rm nonexistent.txt` prints "rm:
+nonexistent.txt: " (empty reason -- errstr() has nothing to report)
+AND still exits 0 -- rm.c's own `exits(errbuf)` treats an empty
+errbuf as success, and errbuf only ever gets non-empty content from a
+real errstr() call, which is empty because nothing calls werrstr() at
+the syscall-failure site. Two gaps compounding into one visible
+symptom (wrong exit status), not two different bugs: fixing "syscalls
+call werrstr() on failure" (a real, separate, larger undertaking --
+would touch the same os/$GOOS/*.c files as the -1-normalization gap
+above, natural to do together) would fix both errbuf's content AND
+the exit status in one pass.
+
+**** DONE: Tier 4 process control (fork/exec/execl/wait/pipe) for linux/darwin/plan9, partial windows
+claude:
+docs/claude_notes/plan_syscalls.txt's own Tier 4 section has the full
+write-up. Landed in two rounds:
+
+Round 1 (linux): all 6 non-rv32 arches, verified end to end via
+tests/c/hello_libc/fork.c under qemu-user on every one of them, not
+just compiled. Design: fork()/pipe() route through port/*.c instead of
+being decl-generated straight to their public name (the arm64/riscv64
+clone/pipe2 shims, the mips wait4-arg-count check).
+
+Round 2 (darwin/plan9/windows), same session as the mips renameat2 gap
+below:
+- darwin (amd64+arm64): port/fork.c/exec.c/execl.c/wait.c/pipe.c
+  turned out to be REUSABLE UNCHANGED from linux -- they only ever call
+  raw _sysfork()/_sysexecve()/_syswait4()/_syspipe() names, never
+  anything GOOS-specific. _sysexecve/_syswait4 are ordinary
+  decl-generated wrappers; _sysfork/_syspipe needed dedicated
+  hand-written asm in svc_{amd64,arm64}.s for XNU's classic BSD
+  dual-register return convention (isChild in a 2nd register for fork,
+  both fds in two registers for pipe -- confirmed against a local
+  darwin-xnu source checkout's bsd/kern/syscalls.master, where both are
+  marked NO_SYSCALL_STUB). Compile+link checked (a real fork.c consumer
+  actually resolves against the new symbols, not just that libc.a
+  itself builds) but UNVERIFIED ON REAL HARDWARE -- no macOS host here,
+  same status as the rest of os/darwin/.
+- plan9 (arm+mips): ported from principia-softwarica's real reference
+  implementation (9sys/fork.c: rfork(RFPROC|RFFDG|RFREND); 9sys/wait.c:
+  await()+tokenize()-parsed Waitmsg, port/tokenize.c also ported).
+  rfork/exec/await/pipe are raw asm stubs (already exactly Plan9-shaped,
+  no C bridge needed, like open/dup/brk). VERIFIED END TO END for
+  pipe() specifically -- machines/5i/vi's own syspipe() genuinely calls
+  the host's real pipe() -- via a new tests/c/hello_libc/pipe.c, run
+  under both emulators. fork()/exec()/wait() do NOT work under either
+  emulator (see the new gap entry below) -- fork.exe is built (proving
+  the whole libc-side chain compiles+links) but not run, same "kept
+  buildable" treatment as stat.exe/dirread.exe before their own
+  emulator gap was found.
+- windows: pipe() implemented for real via CreatePipe (verified: links
+  and, unlike exec(), actually wired into test_windows's run+assert
+  list since it needs no fork()). exec()/execl() implemented as
+  CreateProcessA + WaitForSingleObject + GetExitCodeProcess + exit() --
+  the only way to keep exec()'s "never returns on success" contract
+  honest without a real fork(). fork() and wait() are DELIBERATELY
+  UNIMPLEMENTED, not approximated: there is no address-space-cloning
+  primitive on Windows at all (Cygwin's own fork() needs a whole-system
+  fixed-load-address scheme plus ReadProcessMemory/WriteProcessMemory,
+  a fundamentally bigger project), and wait() has nothing left to wait
+  for once exec() already waited internally in the same process. This
+  means compilers/pcc/pcc.c's actual `switch(fork()){case 0:
+  exec(...)}` pattern still cannot work end to end on windows -- a
+  real, known, permanent-shaped gap, not a TODO. Two new linkers/lk/pe.c
+  imports (CreatePipe; CreateProcessA/WaitForSingleObject/
+  GetExitCodeProcess) needed 6l AND 8l rebuilt (both compile
+  ../lk/pe.c, see the "rebuild all consumers of shared lk files" lesson
+  already in this file's memory) before the new symbols would actually
+  resolve -- caught by trying to link a real consumer, not assumed.
+
+Still open in both rounds:
+- riscv32: deliberately excluded, not silently skipped -- no wait4(2)
+  on that arch at all (numbers_riscv.h's own comment), only waitid
+  (different struct shape). PROCOFILES/fork.exe both carve it out
+  explicitly.
+- kill() was NOT added on any GOOS -- numbers_*.h record the syscall
+  number where convenient, but no port/kill.c exists anywhere; nothing
+  in this area's scope has called for it yet.
+- rc/processes.c's rfork(RFFDG|RFPROC|RFNOTEG) (the real rc shell, not
+  pcc) is a substantially bigger undertaking than plain fork() --
+  BOOT/lib9/rfork.c's own "pipe dance" for RFNOWAIT gives a sense of
+  the scope -- and stays out of scope; both rounds targeted
+  compilers/pcc/pcc.c's simpler fork()/exec()/wait()/pipe() needs.
+
+**** gap: machines/5i/vi don't actually serve RFORK/EXEC/AWAIT (still TODO stubs)
+claude:
+Found while verifying Tier 4's plan9 port (see the DONE entry above).
+Same "kept compiled, not yet runnable end to end" shape as the earlier
+FSTAT/STAT gap, but for process control instead of the stat family --
+and unlike that one, nothing here needed a code fix, both emulators
+already fail predictably rather than crashing:
+
+- machines/5i/syscall_posix.c's sysrfork()/sysexec()/sysawait() are all
+  bare `Bprint(bout, "No system call %s\n", ...); exits(0);` stubs.
+  Confirmed by actually running fork_plan9_arm.exe under 5i: it prints
+  "No system call Rfork" and exits cleanly, not the REGARG/REGRET
+  aliasing segfault FSTAT/STAT used to hit (these three read
+  reg.r[REGARG] as their very FIRST statement, before anything in the
+  same function reassigns reg.r[REGRET] -- the same register, but not
+  yet clobbered at that point -- so the bug class that hit sysstat()/
+  sysfstat() genuinely does not apply here).
+- machines/vi/syscall.c's sysexec()/sysawait() are the same bare
+  "No system call"+exits(0) stub. sysrfork() is more real -- it reads
+  the flags argument and, for any call WITHOUT RFPROC, actually forwards
+  to the host's own rfork() (BOOT/lib9's p9rfork() emulation this tool
+  is itself built against) -- but our own fork() always passes
+  RFPROC|RFFDG|RFREND, so it always hits the `if(flag & RFPROC)`
+  refusal branch ("rfork: cannot create process, rfork(0x...)"; exits(0))
+  instead. Confirmed by actually running fork_plan9_mips.exe under vi.
+
+PIPE is NOT part of this gap -- both emulators' syspipe() genuinely
+works (calls the host's real pipe()), confirmed by the new
+tests/c/hello_libc/pipe.c passing under both 5i and vi.
+
+Real fix needs the emulators themselves to support spawning a second
+guest "process" (RFPROC) and swapping in a new program image (EXEC) --
+a materially bigger feature than a libc syscall wrapper, closer in
+scope to the "5i/vi cannot serve plan9's synthetic device files" gap
+above than to a quick stub fix. Not attempted here.
+
+**** DONE: mips _sysrenameat2's 5th argument was silently dropped
+claude:
+Found while adding Tier 4 (checking whether wait4's 4 raw arguments fit
+svc_mips.s's trampoline, which only wired a1..a4 into R4..R7 -- o32's
+5th/6th syscall argument needs the caller's stack, not a register).
+syscall_linux_mips.decl's _sysrenameat2 (added earlier for Tier 3.5's
+os/linux/dirwstat.c, docs/claude_notes/notes_libc_selfhost.txt's own
+"Round 2" section) declares FIVE arguments (olddirfd, oldpath,
+newdirfd, newpath, flags) -- one more than the trampoline carried. The
+5th (flags) was silently dropped on mips only; every other arch was
+fine. The one caller (dirwstat()'s rename path) always passes flags=0,
+so this had not produced an observable bug yet, but would the moment a
+caller passed a real renameat2(2) flag (RENAME_NOREPLACE,
+RENAME_EXCHANGE) on mips.
+
+Fixed in svc_mips.s's _syscall6: real o32 Linux reads a syscall's 5th/
+6th argument off the CALLER's stack at $sp+16/$sp+20 *at the moment of
+the trap* -- a kernel convention unrelated to this compiler's own
+calling convention for _syscall6 itself (which, coincidentally, also
+stack-passes a5/a6, just at the wrong offset relative to the same SP --
+FP+20/FP+24 instead of the kernel's FP+16/FP+20, because num's own
+unused home slot at FP+0 pushes everything else out by 4 bytes). So
+both still need reading into a register and re-storing at the offset
+the kernel actually reads, not merely left where the caller put them.
+Safe unconditionally for every existing mips syscall, even 0-arg ones
+like fork(): scripts/mksyscall.sh always generates a literal 7-argument
+call to _syscall6 (unused slots padded with 0), so the caller always
+reserves the full argument area this needs.
+
+Verified with a real kernel round-trip, not just re-reading the
+assembly: a throwaway test called _sysrenameat2 directly with
+RENAME_NOREPLACE=1 against an already-existing destination file --
+before the fix this would silently succeed (flags effectively 0/
+garbage), after the fix it correctly fails with -EEXIST (r=-17),
+confirming flags genuinely reaches the kernel now. dir.exe (exercises
+create/remove/chdir, i.e. the trampoline's more common <=4-arg paths)
+still passes unchanged, confirming the a5/a6 stack writes don't
+disturb the existing calls. a6's own half of the fix has no real
+6-argument mips syscall to exercise it yet -- verified only by
+symmetry with a5's, not by an actual kernel round-trip; flag this if
+one is ever added.
+
+Also regenerated tests/s/variants/expected/pe_amd64.exe (unrelated to
+this bug, but touched in the same session): linkers/lk/pe.c's
+importfuncs[] table is a fixed list always fully emitted into every PE
+binary 6l produces, so the earlier windows Tier 4 round's four new
+entries (CreatePipe, CreateProcessA, WaitForSingleObject,
+GetExitCodeProcess) shifted the import-table byte layout of ALL PE
+output, including this golden-diffed test's, which has nothing to do
+with process control itself. `mk test` was failing on the resulting
+128-byte mismatch until the golden was regenerated via the mkfile's
+own `mkgoldpe` rule and re-verified with `vgoldpe`.
+
+**** DONE: setjmp/longjmp for all 7 arches (386/amd64/arm/arm64/mips/riscv/riscv64)
+claude:
+docs/claude_notes/plan_syscalls.txt's own Tier 7 section and
+docs/claude_notes/notes_libc_selfhost.txt's matching "Tier 7:
+setjmp/longjmp, all 7 arches" section have the full write-up. New
+lib_core/libc/arch/$cputype/setjmp.s per arch, wired into each
+mkfiles/$objtype/mkfile's ARCHEXTRAOFILES (arm64/riscv64 needed a new
+ARCHEXTRAOFILES line, having had none before). Verified per arch under
+qemu-user with a real nested-frame round-trip plus the ANSI
+`longjmp(j,0)`-must-return-1 edge case, not just a clean assemble.
+
+One real bug found and fixed: arm64's setjmp() stored SP straight into
+the jmp_buf (`MOV RSP, 0(R0)`), which assembles to a store with the
+value register encoded as 31 -- AArch64 hardwires 31 to XZR in a
+store's value field, not SP, so it silently stored zero; longjmp()
+later restored that zero into the real SP and segfaulted. Every other
+arch's setjmp passed immediately; only arm64 needed `7l -a` disassembly
+to root-cause. Fixed by routing the save through an intermediate
+register, matching the already-correct restore-direction line.
+
+Also caught, unrelated to setjmp itself but only reachable once it
+existed: lib_strings/libregexp's regcomp.c (the actual motivating
+caller) segfaulted on first real use after linking against a
+freshly-built-but-not-`mk clean`ed libregexp.a -- same mixed-arch
+archive corruption this file's Tier 4 entries already document for
+libc.a, just hit on libregexp.a for the first time since nothing could
+link against it before setjmp existed. `mk clean` before `install` for
+both libraries fixed it. Verified end to end with a harness that
+deliberately drives regcomp.c's rcerror()->regerror()->longjmp()
+error-unwind path with a malformed pattern (confirms regcomp() returns
+nil rather than crashing, and that a subsequent valid compile still
+works afterward), and with utilities/text/misc/sed.exe (amd64)
+performing a real `s/../../` substitution end to end.
+
+**** DONE: Tier 6 notification (notify/noted/atnotify/postnote), Plan9 + Linux
+claude:
+docs/claude_notes/plan_syscalls.txt's own Tier 6 section and
+docs/claude_notes/notes_libc_selfhost.txt's matching "Tier 6:
+notification, Plan9 side (arm/mips)" section have the full write-up;
+docs/claude_notes/notes_libc_api_design.txt's "Notes vs. signals"
+section has the design reasoning behind the split. Two new raw syscall
+stubs per plan9 arch (syscall/os/plan9/svc_{arm,mips}.s: notify/noted,
+same one-line shape as rfork/exec/await/pipe), a new GOOS-independent
+port/atnotify.c (the NFN-slot dispatch chain, ported from principia
+and confirmed identical in shape to plan9port's own BOOT/lib9/
+atnotify.c too), a new plan9-only os/plan9/postnote.c (write() to
+/proc/PID/note, not a syscall), and include/os/plan9/note.h finally
+#include'd from libc.h after being fully written but orphaned.
+
+Build-verified only, not runtime-verified: a real end-to-end test
+(register a handler, postnote() to self, check it actually ran)
+compiles and links clean for both plan9 arches, but machines/5i and
+machines/vi turned out not to actually deliver notes at all --
+sysnotify() just stashes the handler pointer without ever calling it,
+sysnoted() is an unconditional abort stub. Pre-existing emulator gap,
+same category as Tier 4's own "5i/vi don't actually serve RFORK/EXEC/
+AWAIT" entry -- accepted rather than fixed (extending the interpreter
+to really deliver notes is a separate VM feature, not libc glue).
+
+Linux side now DONE too, all 7 arches -- see notes_libc_selfhost.txt's
+"Tier 6: notification, Linux side, all 7 arches" entry for the full
+write-up. rt_sigaction/kill added as real raw syscalls per arch
+(numbers confirmed against real kernel source, mips diverging in
+three independent ways: numbers, a 128-signal/16-byte sigset, and a
+different, restorer-less struct shape). The real surprise of this
+round: installing the dispatcher as sa.handler needed a per-arch
+bridging trampoline (sigentry) whose necessity AND shape varied by
+arch for different reasons -- amd64/mips/riscv/riscv64 have a genuine
+kernel-ABI-register vs. this-compiler's-own-calling-convention
+mismatch; 386 needs bridging for an unrelated reason (a bare JMP to
+an external symbol doesn't work as a raw signal-handler entry point,
+confirmed by testing, not assumed); arm/arm64 need no bridging at
+all. SA_RESTORER is a separate, independently-arch-specific axis:
+only amd64 actually needs one; 386 specifically CRASHES if you add
+one back. None of this was assumed uniform from one arch's fix --
+found via isolated per-arch probes under each arch's own qemu-user
+emulator, iterated until each one actually worked. Verified via a new
+tests/c/hello_libc/notify.c, run for real (not just compiled) on all
+7 arches including riscv32 (no carve-out needed here, unlike Tier 4's
+own fork/wait4).
+
+darwin side: postnote() only, DONE and compile+link verified for real
+(amd64 and arm64, real Mach-O binaries -- amd64 needed the -z/
+RT0OFILE build overrides tests/c/hello_libc/mkfile's own
+test_macos_amd64 target already requires, missed on the first attempt
+and self-corrected by reading docs/claude_notes/notes_exec_macho.txt
+rather than assumed broken). notify()/noted() deliberately not
+attempted: unlike every other "no macOS host" darwin gap in this
+project, this one is a genuinely unresolved DESIGN question, not just
+an unverified implementation -- XNU's raw sigaction(2) needs a
+userspace sa_tramp trampoline whose modern necessity could not be
+confidently resolved from public apple-oss-distributions source in
+this session, and there is no qemu-user Darwin emulation to test a
+guess against the way Linux's own sigentry bug family was found and
+fixed. See notes_libc_selfhost.txt's "Tier 6: notification, darwin
+side" entry for the full story.
+
+**** DONE: environ()/putenv(), all 4 GOOS
+claude:
+docs/claude_notes/notes_libc_api_design.txt's "Environment (getenv/
+putenv/environ)" entry has the design reasoning (getenv()/putenv()
+kept as the real API instead of a Plan9-shaped virtual-/env
+abstraction; a new environ() exposed as the portable enumeration
+primitive); docs/claude_notes/notes_libc_selfhost.txt's "environ()/
+putenv(), all 4 GOOS" entry has the full build/verify write-up.
+
+environ() (include/os/env.h) exposes port/getenv.c's own previously-
+static _mainargv walk. putenv() -- declared since before this
+session but backed by zero code anywhere in this tree -- got a real
+implementation on linux+darwin (port/putenv.c), plan9 (os/plan9/
+putenv.c, ported from principia's own 9sys/putenv.c), and windows
+(os/windows/putenv.c over a new _winsetenv/SetEnvironmentVariableA
+stub, added to linkers/lk/pe.c's own importfuncs[] table).
+
+Verified for real (add/replace round-trip via getenv()/putenv()/
+environ()) under qemu-user on linux/amd64+arm64; compile+link only
+for darwin/amd64 and windows/amd64 (the established bar for both).
+plan9/arm builds and links, but a real run under machines/5i found
+/env access does not work under 5i/vi at all -- confirmed
+pre-existing (untouched getenv("PATH") also returns nil there), same
+category of gap as the notify()/noted() one, accepted and documented
+rather than fixed (extending 5i/vi to synthesize a real /env
+filesystem is a separate emulator feature).
+
+Also hit and fixed: the new PE import shifted tests/s/variants' own
+golden-diffed pe_amd64.exe, the exact same regression Tier 4's own
+windows round already hit -- fixed with `mk pe_amd64.mkgoldpe`, the
+same documented procedure, not by avoiding new PE imports. linkers/6l
+itself needed a real rebuild after editing the shared lk/pe.c source,
+same "rebuild all consumers of shared lk files" lesson already on
+record.
+
+mk/rc's own readenv()/exportenv() were deliberately NOT rewired to use
+any of this -- out of scope by explicit direction, left for whenever
+mk/rc self-hosting is actually picked up.
+
+*** libc (or libos?) (relying on libsyscall)
+
+** Arch
+
+*** arm, 5a/5c/5l
 
 **** try use different VFP instructions for floats?
 MOVF → VLDR/VMOV.F32/F64 + literal pool or immediate load).
@@ -232,70 +1940,33 @@ something that my Ampere Altra can run?
 
 look softfloat.c of 5l ? look 9front? more recent float instructions?
 
-
-** golang ARM toolchain : 5a_/5c_/5l_
-
-*** still? can't use 5c on principia libc code, weird!!!
-wait.c:33 unknown type 15 in zaddr
-can repro minimal case?
-set principia/env.sh to point to goken/ROOT/arm64/bin/?
-
-*** goken: get tests/c/mini2/helloprintf_nofloat_no64.exe working for 5a/5c/5l
-linux_arm.s syscalls
-but got segfault now :( even worse than before
-
-update: better now that I made it work with 5l_ ?
-
-** other golang toolchain
-
-*** 8a_/8c_/8l_
-
-**** principia x goken x 8a_/8c_/8l_: compilation error sysfatal.c
-8c -FTVw -I../../../include/arch/386 -I../../../include/ALL sysfatal.c
-sysfatal.c:27 rounding by 0
-
-
-** C compilers: 5c/6c/8c
-
-** assemblers: 5a/6a/8a
-
-** linkers: 6l/6l/8l
-
-** mk/rc
-
-*** rc
-
-**** regsub_ in Plan9.c and Posix.c
-alt: adapt libregexp in principia to match the one in goken/kencc
-right now in mk I need to adjust 
-
--                            regsub(pre->s, buf, /*sizeof(buf),*/ rmatch, NREGEXP);
-+                            regsub(pre->s, buf, sizeof(buf), rmatch, NREGEXP);
-
-**** LATER: port enough of :I: so can use goken mk for mk sync too!!!
-so don't need to switch back and forth between kencc/goken mk
-and xix mk
-
-** libs
-
-*** libcore
-
-** Arch
-
-*** arm_ (not arm__)
-
-**** tests/c/mini2: run mk objtype=arm_ test_one in c/mini2/ too, remove NOSPLIT check
-by using ifdef
-
-but then with 5l requires sfloat in vlop.s, then sfloat2 in softfloat.c
-and more stuff
-
-*** arm (not arm_, not arm__)
-
 *** arm64, 7a/7c/7l
 
-**** fix tests/c/mini2/, first segfault and then restore the
-local byte buf[100] in print_nofloat.c
+**** DONE: gap: 7l can't link a function whose address-taken stack locals push an offset past ~4095 bytes
+claude:
+"illegal combination DWORD NONE NONE LACON" -- found porting
+utilities/files/mv.c (two 4096-byte local char[] buffers plus a
+memcmp() call on one of them). Blocked utilities/files/mv.c and
+utilities/kernel/data2s.c from linking on arm64 (amd64 links and runs
+both correctly); not fixed as part of that porting work at the time.
+
+Root cause and fix landed while runtime-testing the mk/rc self-host
+build on real macOS/arm64 hardware for the first time (mk.c's own
+large-stack-frame functions hit the identical error): linkers/7l/
+span.c's addpool() already resolves C_UAUTO4K/.../C_LAUTO/C_LOREG (and
+every other auto/oreg class) to a plain integer pool constant via the
+already-computed `instoffset` -- C_LACON (the "address-of a local
+variable" class aclass() returns for D_AUTO/D_PARAM, span.c's own
+aconsize: label) was simply missing from that switch's case list, so
+it fell through to `default: t.to = *a;`, keeping the original
+symbolic $var-offset(SP) operand instead -- which then has no matching
+ADWORD optab row (only C_VCON/C_LEXT/C_ADDR exist there). Not a missing
+encoder, and not actually about "offset past 4095" per se: adding
+`case C_LACON:` to the same switch as the other auto/oreg classes was
+the whole fix. Confirmed against 9front's own sys/src/cmd/7l/span.c,
+which already has C_LACON in that exact list (plus an `offset too
+large` overflow diag() not ported here, no repro for it yet). See
+docs/claude_notes/notes_arch_arm64.txt's updated entry.
 
 **** add commits from 9front after initial import
 lots of fixes from cinap probably worth taking
@@ -315,39 +1986,21 @@ in 9-cc
 
 useful?
 
-**** get objdump to work on helloc_arm64.exe/helloc_arm_.exe too
+**** get objdump to work on helloc_arm64.exe/helloc_arm.exe too
 what special thing we need to add in the elf binary?
 it works for the arm32 binary with 5l but not 5l_
 
 *** mips
 
-**** tests/c/mini2: run mk objtype=mips test_one in c/mini2/
-need extend minilibc.h to state uintptr for mips arch
-and also need a linux_mips.s
-
-**** helloprintf for mips
-
-**** try vi on hello_plan9_mips.exe
-error "can't read 4 bytes of symbol table"
+**** add commits from 9front after initial import
 
 **** can use acid to disassemble mips generated code and see it works?
 as I can't use objdump
-
 
 *** riscv 
 #riscv and plan9!
 # https://riscv.org/news/2020/10/a-plan-9-c-compiler-for-rv32gc-and-rv64gc/
 # also xv6-riscv?
-
-**** exit_linux_riscv.exe currently segfault
-
-***** exit_linux_riscv64.s ? better?
-
-
-**** riscv: hello_linux_riscv.exe (and test with qemu-riscv32)
-
-***** hello_linux_riscv32.S for binutils to see the diff
-with the one I'm generating
 
 **** riscv: RELAX add also libmach code for i arch (riscv)
 in 9front? in miller original tgz? in 9cc?
@@ -360,7 +2013,21 @@ try acid on it?
 
 ** OSes
 
-*** plan9 and goken
+*** Linux
+
+*** Windows
+
+**** hello_windows_x86.c
+try make hello.c that link with a few sys.s for windows and link for windows
+
+**** window.yml: try install mingw from windows-latest GHA job as experiment
+so later can try to compile goken9cc in CI!
+
+imitate some of the stuff in semgrep/.../build-windows-x86
+
+*** macOS
+
+*** Plan9
 
 **** try tests/c/hello_plan9_arm.exe from .c!
 mini libc
@@ -370,40 +2037,14 @@ mini libc
 
 tests/c/mini2/ ?
 
-*** make goken compile on Windows 386
-
-**** make part of goken compile on windows
-until 6g at least; even though sad that get runtime error when running 6g
-
-***** fix weird compilation error in windows lib9/ that if you type make again
-then it works the second time
-
-**** hello_windows_x86.s
-no simple sys.s like for darwin and linux :(
-no interrupt and simple syscalls. Have to use this
-stdcall complex thing and kernel32.dll and maybe complex setup
-
-**** hello_windows_x86.c
-try make hello.c that link with a few sys.s for windows and link for windows
-maybe remove *.go in runtime/ and see if can build a runtime.a that
-I can then use then to link a simple hello.c calling print.c
-
-try rt0.8 and then 8l but then linking errors so missing stuff
-
-**** try to fix 6g on Windows? still betypeinit error?
-
-**** window.yml: try install mingw from windows-latest GHA job as experiment
-so later can try to compile goken9cc in CI!
-
-imitate some of the stuff in semgrep/.../build-windows-x86
+*** xv6
 
 ** Debugger
 
-*** SEMI port acid/ so can use it to dump the arm64/arm_ binaries!
+*** SEMI port acid/ so can use it to dump the arm64/arm binaries!
 and see the disassembled code.
 right now objdump and llvm-dump and gdb do not work :(
 (strace does at least)
-
 
 *** FUN Debuggers.nw, try understand acid? and libmach? and add in goken?
 there is a 9-cc/acid/ !
@@ -412,10 +2053,11 @@ update: chatGPT says it actually can't debug live process :( or can just inspect
 its state
 maybe still useful though ...
 
-
 *** acid fixes
-# seems to work on 386, amd64, and arm_ hello_xxx binaries
+# seems to work on 386, amd64, and arm hello_xxx binaries
 arm64? 7db.c does not work?
+
+need reimport the lpized version! and adapt to plan9port improvements
 
 **** RELAX acid can't load hello_plan9_mips.exe
 because I didn't add v.c and vdb.c yet! (and vobj.c and vcodas.c)
@@ -426,33 +2068,24 @@ and exit_linux_...
 **** acid can't decode file header for hello_linux_arm.exe
 and exit_linux_...
 
-note that it can decode hello_linux_arm_.exe
+note that it can decode hello_linux_arm.exe
 
 weird because libmach relies on 5l/5.out.h, not 5l_/
 
 ***** merge 5l/ 5l_/ 5.out.h
 because used then in libmach!
 
-**** weird take long time to load on helloprintf_arm_.exe
+**** weird take long time to load on helloprintf_arm.exe
 and can't find any symbol except a weird "rue" ???
 
 note that the program has an illegal instruction at runtime,
 maybe this is the cause?
 
-**** weird, acid can't show symbols on helloc_arm_.exe
+**** weird, acid can't show symbols on helloc_arm.exe
 
 *** port also db to goken
-seems to be defined in plan9port
-
-** GO stuff
-
-*** FUN try run with qemu on bare hardware, try runtime/tiny target with qemu on x86
-see also DELETED/misc/arm/ and the use of adb and maybe android emulator
-
-**** try also the tiny/arm ? but no write :)
-
-*** still? rerun the mkdefs, mksyscall, ... to generate the updated zxxx?
-alt: take them from latest go repo and hope it's backward compatible?
+seems to be defined in plan9port too
+less important though
 
 ** Rest (generators, utilities, typesetting)
 
@@ -461,12 +2094,14 @@ alt: take them from latest go repo and hope it's backward compatible?
 **** RELAX LPize yaccpar too, and yaccpars
 and sync in goken and principia
 
-**** try to remove dependency to bison?
+**** allow also to use bison?
 good though to also work with bison; it reports more bugs
 than plan9 yacc and it's good to be compatible, just like
 getting kencc to compile with gcc so easier to bootstrap.
 
 *** goken/utilities/
+
+**** reimport and resync lpized awk that does not use APE
 
 **** RELAX LP split tr.c, join.c, sed.c, diff*.c
 and also make it work on goken
@@ -495,12 +2130,6 @@ rc ../port/mkbootrules pi
 
 
 *** fix bugs in goken progs
-
-**** bug goken 5i, does not seem to work on hello_plan9_arm.exe
-compare to running 5i under plan9
-bug in libmach? because 5i code in goken is the same than in principia
-
-**** sync 5i with principia Machine.nw
 
 **** bug goken mk/rc, adding lnrand.c to lib9/mkfile didn't trigger recompilation
 use mk -dg
@@ -549,19 +2178,6 @@ and lp and tr2post
 
 ** Test infra
 
-*** use 5i/vi in mk test and in CI to run some hello_plan9_xxx programs?
-
-*** testinfra: try make golang work for arm32? use armhf gcc and
-compile the whole golang source tree and run the tests?
-=> good regression test infra at least
-see GO/all-arm and GO/tests/run-arm 
-
-it compiles code with gcc (arm64), and we could adjust to arm-linux-gnueabihf-gcc
-but I don't think it's the problem because then we get this error
-at compile-time and don't even reach the testing part:
-
-<epoch>: internal compiler error: betypeinit failed
-
 *** LATER: try to compile goken with goken9cc!!!
 
 *** More workflows! build_amd64_linux.yaml, build_amd64_windows
@@ -572,30 +2188,18 @@ start multi GOOS and GOARCH in CI? in Docker can try all combinations?
 
 ** Build infra
 
-*** less: get rid of dependency to byacc? use the included generators/yacc/yacc.c
-
-
 *** switch to GOHOST and GOTARGET instead of GOARCH?
 or GOARCHHOST, GOARCHTARGET, GOOSTARGET ?
-
-*** still? switch from bison to yacc? so can work on plan9!
-anyway I get bad errors about yerr.h that we could fix by switching to regular yacc!
-update: seems to work already; I use yacc in my mkfile
 
 *** LATER: try to compile goken9cc on plan9!!!!!
 need VM then ... and need to find a way to transfer data from one to the other
 
-*** still? support native windows (in Nt/) like in the original kencc?
-needed?
-
 ** Bench infra
-
-*** LATER add C tests and C bench for goken9cc
-take the one from Leroy for compcert?
 
 ** Dev infra
 
 *** devinfra: RELAX fix all gcc warnings in goken show when running 'mk'
+and especially clang warnings as clang seems stricter
 
 *** can detect the ugly 'stdin' Binit in sed.c that
 was fixed in inferno-os but caused some segfaults?
@@ -614,18 +2218,6 @@ and restore the syntax/ from the testsuite and other few tests
 and abusing -Wno
 
 ** Internals
-
-*** update from plan9?
-
-*** update from inferno-os?
-looks like it contains the latest portable sources
-kencc and 9-cc seems not uptodate
-
-but at the same time, I don't think it has 5a/5c/... synced
-with the latest plan9 versions 
-(which I did sync to get a working raspberry pi build of plan9)
-
-*** update from 9front?
 
 * Docs
 

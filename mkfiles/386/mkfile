@@ -1,18 +1,27 @@
 <$TOP/mkfiles/mkfile.proto
 
-# A few flag explanations:
-# - the -m32 to force 32bits arch
-# - the -mfpmath=sse is to avoid mismatch when interpreting float literals
-#   so that the compilation of tests/c/misc/f_1_e_126.c leads to same code
-# - the --std=gnu89 otherwise can't compile with recent defaults for gcc/clang
-CC=gcc -m32 -mfpmath=sse -sse2  -Wno-cpp --std=gnu89 -c
-LD=gcc
-AS=gcc
-O=o
+# the goken cross-toolchain itself: used by tests/ (mk objtype=386) and,
+# once self-hosting is viable, as CC/AS/LD for the top-level build too
+O=8
+CC=8c
+LD=8l
+AS=8a
+AR=iar
 
-# used in tests/
-O_=8
-CC_=8c
-LD_=8l
-AS_=8a
-AR_=iar
+# -Dcputype386 (word-shaped, not lib_core/libc/mkfile's usual bare
+# -D$cputype): "386" alone is a valid #define name (Xc's cpp accepts
+# `-D386`) but NOT a valid #ifdef *operand* -- purely numeric tokens
+# fail there ("syntax in #if(n)def"), confirmed empirically (this
+# compiler has no other arch whose $cputype is a bare number, so
+# nothing else in this tree has ever hit it). port/getcallerpc.c's own
+# #ifdef needs to tell this arch apart from the others, hence this
+# word-shaped alias, set here (arch-specific) rather than in
+# lib_core/libc/mkfile (which would have to special-case 386 in a
+# supposedly-generic, every-arch code path).
+CFLAGS=$CFLAGS_COMMON -I$TOP/include/arch/386 -Dcputype386
+
+# lib_core/libc/port/getcallerpc.c's own #ifdef guards out its portable
+# fallback for this arch, expecting a real implementation instead --
+# see lib_core/libc/arch/386/getcallerpc.s and lib_core/libc/mkfile's
+# own ARCHEXTRAOFILES comment for why this is set here, not there.
+ARCHEXTRAOFILES=arch/386/getcallerpc.$O arch/386/vlop.$O arch/386/setjmp.$O

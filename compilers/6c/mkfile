@@ -1,0 +1,29 @@
+TOP=../..
+<$TOP/mkfiles/$objtype/mkfile
+
+TARG=6c
+LDLIBS=-lbio $BOOTLIBS
+
+OFILES=\
+	cgen.$O\
+	enam.$O\
+	list.$O\
+	sgen.$O\
+	swt.$O\
+	txt.$O\
+	reg.$O\
+	peep.$O\
+	pgen.$O\
+	pswt.$O\
+	machcap.$O\
+	div.$O\
+	mul.$O\
+
+HFILES=	gc.h $TOP/include/obj/6.out.h $TOP/compilers/cck/cc.h
+
+LIB=$TOP/compilers/cck/cc.a$O
+
+<$TOP/mkfiles/mkone
+
+p%.$O: $TOP/compilers/cck/p%.c
+	$CC $CFLAGS $TOP/compilers/cck/p$stem.c

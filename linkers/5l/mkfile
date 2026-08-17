@@ -2,6 +2,7 @@ TOP=../..
 <$TOP/mkfiles/$objtype/mkfile
 
 TARG=5l
+LDLIBS=-lbio $BOOTLIBS
 
 OFILES=globals.$O\
     utils.$O\
@@ -27,12 +28,9 @@ OFILES=globals.$O\
 	elf.$O\
     main.$O\
 
-HFILES=\
-	l.h\
-	../8l/elf.h\
-    $TOP/include/ALL/5.out.h
+HFILES=	l.h $TOP/include/exec/elf.h $TOP/include/obj/5.out.h
 
-CFLAGS=$CFLAGS -. -I.
+CFLAGS=$CFLAGS -I.
 
 <$TOP/mkfiles/mkone
 

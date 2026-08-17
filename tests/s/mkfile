@@ -1,0 +1,6 @@
+TOP=../..
+
+# float/ contains just temporary tests
+DIRS=exit features mini regressions variants
+
+<$TOP/mkfiles/mkdirs

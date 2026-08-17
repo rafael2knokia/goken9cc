@@ -1,0 +1,268 @@
+The arm (32-bit) toolchain (5a/5c/5l): reconciling principia with kencc
+=========================================================================
+
+Notes on making 5a/5c/5l (the principia-softwarica-synced lineage)
+byte-identical to 5ak/5ck/5lk (the kencc reference lineage) -- the
+arm counterpart of docs/claude_notes/notes_arch_x86.txt's 386 story, worked out a
+few days later using the same playbook (branch `mismatch_5`, merged in
+8debd46e7) but hitting a genuinely different set of bugs: 386 and arm
+share very little machine-specific linker logic, so almost nothing
+here overlaps with the x86 file, only the underlying *shape* of
+"literate-programming refactor silently changed behavior" repeats. For
+the shared 5.out.h header work and ELF-specific fixes, see
+docs/claude_notes/notes_exec_elf.txt. See compilers/5c/, assemblers/5a/,
+linkers/5l/ vs. their 5ck/5ak/5lk counterparts.
+
+5.out.h: unifying the object-header numbering first
+---------------------------------------------------------
+
+Before any codegen bug could even be compared apples-to-apples, the
+kencc arm lineage needed to speak the same object-file numbering as
+the principia-synced one. 5lk/5ck now include the principia-synced
+include/5.out.h (the numbering this project treats as canonical)
+through a thin linkers/5lk/5.out.h compat wrapper that adds back the
+kencc-only pieces without disturbing any already-serialized value: the
+extra opcodes kencc appends after ALAST (dynamic linking, thumb, load/
+store-exclusive, DWORD), ABCS/ABCC aliased to ABHS/ABLO (same
+condition codes, different historical names), and the D_*/N_* symbol-
+kind aliases. mkenam is regenerated from the shared header plus this
+wrapper. 5lk and 5ck/peep.c needed matching adaptations to read the
+D_ADDR operand kind (serialized like D_CONST) and keep ABCS/ABCC
+working in the branch tables. Same playbook as unifying 8/8k's shared
+header, done first here because every downstream comparison depends on
+both lineages agreeing on what a given byte in an object file means.
+
+5a: an LP simplification that silently dropped SP/PC as operands
+------------------------------------------------------------------------
+
+An October 2015 principia make-sync (38a4d330) merged the assembler's
+regi/regi_nosp split (plan9's original spreg/sreg) into one production
+and, in doing so, dropped the LSP/LPC alias productions -- silently
+removing SP and PC as valid register operands (`MOVW PC, R2`, `MOVW
+R8, SP`, `(SP)` all stopped parsing). Restored the split: regi_nosp
+(no SP) is specifically what the offset memory-base grammar rule needs,
+so it doesn't collide with the `con (LPC)` branch rule once LPC comes
+back. Landed together with two smaller assembler fixes found the same
+way: swallowing C's integer-literal suffixes (`1024u`, needed by the
+bcm/raspberry-pi kernel's mem.h) and using D_ADDR for `$sym(SB)` to
+match plan9's x86 8a. Also fixed: outcode() used `lineno` instead of a
+stmtline-tracking yylex wrapper, which is not deterministic with
+respect to yacc's newline-lookahead timing the way stmtline is. See
+tests/s/variants/{addr_arm,swi_line_arm,call_arm}.
+
+5c: a register-allocator leak and a truncated NaN-comparison flag
+-------------------------------------------------------------------------
+
+Two bugs in the principia arm compiler, both principia LP-refactor
+regressions, both found simply by running 5c over the whole principia
+corpus for the first time -- it had apparently never been exercised
+on real code before this pass:
+
+- ginit()'s resvreg[] snapshot (which registers gclean()'s end-of-
+  function sanity check should ignore) was taken *before* R9/R10
+  (REGEXT/REGEXT-1) were reserved, so that check fired "reg N left
+  allocated" for R9/R10 at the end of *every single function* -- 5c
+  failed on all input, unconditionally. Introduced by a 2018-01-17
+  "mk sync" (principia dae86be2) that reordered the ginit literate
+  chunks. Fixed by marking resvreg[REGEXT]/[REGEXT-1] too.
+
+- gopcode()'s `btrue` was declared `bool` (== uint8), but holds `o &
+  BTRUE` where BTRUE == 0x1000 (bit 12 -- no bits at all in the low
+  byte), so the byte-wide truncation silently zeroed it every time.
+  This disabled the NaN-safe branch substitutions for float
+  comparisons (ABMI/ABPL/ABGT/ABHI standing in for the naive signed
+  integer branches on `</>=/>/<=`), so 5c emitted the wrong
+  (integer-comparison) branch encoding for floats -- different bytes
+  from kencc, and actively wrong under NaN (e.g. `NaN>0` evaluated
+  true via ABHI, which is incorrect). kencc declares the same flag
+  `int true`; fixed by matching that.
+
+With both fixes, 5c matched kencc byte-for-byte over the entire arm
+corpus: 1921 match / 0 differ. See tests/c/variants/{reg_alloc_arm,
+float_cmp_arm}.
+
+5l: four separate mismatches, landed one at a time
+--------------------------------------------------------
+
+The linker took the most passes to reconcile, each mismatch masking
+the next one until it was fixed:
+
+- **AGLOBL redefinition.** plan9 emits the shared `.rathole` scratch
+  symbol as a global BSS declaration in every object file and expects
+  the linker to merge repeats, keeping the largest size seen. The
+  principia refactor made any repeat definition a fatal "redefinition:
+  .rathole" -- so no multi-object link worked at all until this was
+  fixed to tolerate it.
+
+- **Missing optab row.** `AWORD C_LEXT` -- a WORD directive holding an
+  external symbol's address, i.e. a constant-pool word for `MOVW
+  $sym(SB)` -- classified as C_LEXT and had no matching optab entry,
+  failing outright with "illegal combination WORD 0 0 17".
+
+- **BIG (the SB bias) was 0 instead of kencc's `(1<<12)-4` = 4092.**
+  This is the one that mattered most: BIG is how far into the data
+  segment setR12 (SB, R12) is defined, so that SB-relative offsets can
+  reach +/-BIG; aclass() subtracts BIG from a symbol's offset before
+  deciding whether a load is "near" (single instruction) or "far"
+  (goes through the literal pool). With BIG=0, SB pointed at the very
+  start of the data segment, so small positive offsets classified as
+  near loads (C_FEXT/C_SEXT) where kencc -- with SB biased forward and
+  the resulting offset made negative -- classified the *same* offset
+  as far (C_LEXT), needing the 3-instruction SB-relative-via-pool
+  form. That single classification difference cascaded into every
+  float and large-constant load in every arm program, producing
+  systematically different (and usually smaller) principia-lineage
+  code: the root of a ~3% divergence a full linker corpus sweep had
+  found (0/28 exact matches before this fix).
+
+- **A missing follow() pass dropped a duplicate trailing RET.** 5c
+  emits `RET; RET` at the end of every function (the explicit return,
+  plus an always-present fall-through RET), relying on the linker's
+  follow()/xfol() pass to collapse the dead one away. The principia
+  linker never called follow() at all, running passes as `noops;
+  dodata; dotext` instead of kencc's `dodata; follow; noops; span` --
+  so every function kept an extra ~4-byte `B (R14)`. follow() has to
+  run *before* noops() specifically, since noops() rewrites ARET into
+  a B/MOVW sequence that would hide the terminal RET from xfol()'s own
+  ARET-based detection.
+
+With BIG and follow() both fixed, arm text and data segments became
+byte-identical between the two lineages -- stripped executables match
+exactly. (An unstripped symbol-table delta remained a little longer:
+kencc emits a few more auto/frame records; resolved separately, not
+detailed here.) Two smaller linker fixes landed the same way: tolerate
+procedures over 128K instead of erroring out (matching kencc), and
+default INITTEXTP to INITTEXT plus setting the arm EABI e_flags
+(0x5000200) in the shared 8l/elf.c code path when the target machine
+is ARM -- needed before Linux would exec() an arm binary at all (see
+docs/claude_notes/notes_exec_elf.txt's own EABI section for why this class of
+mistake fails so much earlier than a bad PT_LOAD entry would).
+
+A cross-cutting fix along the way: mallocz() where a bump allocator's zeroing was assumed
+-------------------------------------------------------------------------------------------------
+
+Separately from the mismatch-hunting above, routing 5l through lib9's
+real malloc (to fix a macOS out-of-memory issue with the old zero-
+filling bump allocator, gethunk/sbrk) surfaced three allocations that
+had been silently relying on that allocator's implicit zeroing:
+ldobj()'s per-instruction Prog (left p->optab as garbage, so oplook()
+returned a stale entry for a zero-width ATEXT and wrecked the whole
+text layout -- TEXT symbols never got an address, so the ELF entry
+point came out 0), lookup()'s Sym (stale s->file corrupted the symbol
+table's file index), and addhist()'s history Sym (all-but-name
+garbage). Fixed by using mallocz() specifically for those three, not a
+blanket switch -- prg() and the Auto/Ieee allocations were already
+fully initialized and stayed on plain malloc. This is the arm-specific
+instance of a fix already needed and applied more broadly to the
+linker allocators in this project; see the "Simplify linker
+allocators" cleanup item this pattern motivated for the wider context.
+
+Reaching full parity
+------------------------
+
+51b21b872 records the final state, once BIG/follow()/mallocz()/5.out.h
+all landed: byte-identical to kencc over the whole principia corpus --
+assembler 161/0, compiler 1932/0, and the full A/B world build
+(cmp-exec-corpus-arm.sh) at 254/254, including linking the bcm
+(raspberry pi) 9pi kernel itself. At that point the principia-synced
+5a/5c/5l became this project's default install names (matching the
+swap already done for 8a/8c/8l), with 5ak/5ck/5lk demoted to the
+kencc-reference names -- arm reaching full symmetry with x86's earlier
+reconciliation.
+
+lib_core/libc bring-up: ABI facts, and a genuinely new 5l bug
+--------------------------------------------------------------------
+
+Building a self-hosted libc.a for arm (see
+docs/claude_notes/notes_libc_selfhost.txt for the cross-cutting story
+covering all seven arches this now spans) needed real 5c ABI facts:
+
+- Calling convention: only the first named parameter arrives in a
+  register (R0), exactly like arm64/mips/riscv -- confirmed against
+  `5c -S` output, a compiler-generated function only spills it to its
+  FP+0 home slot if its address is actually taken. Every other
+  argument packs at its exact natural sizeof() width -- like mips
+  (not riscv: no 8-byte-alignment rounding for doubles/vlong) -- and,
+  since arm is little-endian (unlike mips), a narrower-than-4-byte
+  value sits at the *start* of its 4-byte slot, not the end. See
+  include/arch/arm/u.h's own va_arg comment; the macros there are
+  taken close to verbatim from ~/principia/include/arch/arm/u.h
+  (already validated there), just re-derived from real 5c -S output
+  first rather than trusted blind -- this is the same "adapt, don't
+  copy blind" discipline applied to every arch in this pass.
+
+- arm has no hardware integer divide instruction, so 5c emits calls to
+  runtime helpers (_div, _divu, _mod, _modu) for any C division/
+  modulo -- copied verbatim into lib_core/libc/arch/arm/div.s from
+  tests/c/mini2/linux_arm.s's own copy (itself "from
+  principia/libc/arm/div.s"), wired in via lib_core/libc/mkfile's new
+  $ARCHEXTRAOFILES hook (see that mkfile's own comment -- kept out of
+  the generic ARCHOFILES list since no other arch needs it).
+
+- A real, previously-undiscovered bug surfaced pulling those helpers
+  from an actual library (libc.a, via -lc) instead of naming their
+  object file directly on the link command line (every prior arm test
+  in this tree -- tests/c/mini2, tests/c/vlong -- did the latter, which
+  sidesteps this entirely): linkers/5l/noop.c's initdiv() only ever
+  looks for _div/_divu/_mod/_modu's TEXT definitions in the program
+  text already loaded by the time it runs from noops() -- which is
+  *after* loadlib()'s one-shot library-scanning pass (see main.c's
+  loadlib()/patch()/dodata()/follow()/noops() ordering) -- so a
+  definition living inside a library never gets pulled in; noops()
+  just diagnoses "undefined: _div" and gives up.
+
+  Confirmed NOT a regression or something already fixed upstream:
+  ~/xxx/9front/5l/{obj,noop}.c and ~/principia/linkers/5l/{main,noop}.c
+  have the exact same code shape (the early initdiv() call gated
+  behind `dlm`/dynamic-module builds only, the lazy call from noops()
+  as the only path for normal static links, library[]/libraryp
+  populated only via an embedded `#pragma lib` directive, never from a
+  plain -lXXX flag or a library named directly on the command line).
+  This project's own principia-synced arm kernel build (the bcm/
+  raspberry-pi 9pi kernel, cmp-exec-corpus-arm.sh, see "Reaching full
+  parity" above) already linked successfully with this exact
+  unfixed 5l -- which doesn't mean it was silently broken, it means
+  the kernel's actual C source apparently never emits a bare 32-bit
+  ADIV/AMOD reachable through a library pull (constant divisions get
+  optimized to shifts by 5c; wide/runtime division mostly goes through
+  vlrt.c's separate _divv/_modv instead). Verified directly: relinking
+  a tiny division-using test against a library built the same way
+  principia's own kernel mkfile does (a .a path given directly,
+  alongside -l to disable the unrelated #pragma-lib auto-loading
+  mechanism) reproduces the identical "undefined: _div" failure on
+  unfixed 5l -- so this really is a general, previously-unexercised
+  gap, not something specific to -lc or to this project's own link
+  invocations.
+
+  Fixed with two pieces, both needed together:
+  (1) linkers/5l/main.c's object-loading loop now also records every
+      -lXXX flag *and* every plain filename ending in ".a" into
+      library[] (previously populated only by the #pragma-lib
+      mechanism) as it processes argv, so a later library rescan has
+      something to search regardless of which style named the library;
+  (2) a new needsdiv() pre-scan (noop.c), called from main.c right
+      after the first loadlib() and *before* patch(), cheaply checks
+      whether the program uses any ADIV/ADIVU/AMOD/AMODU at all and,
+      if so, calls initdiv() right there -- early enough that a
+      library pull-in (now safe to trigger, via loadlib(), from inside
+      initdiv() itself, marking the missing symbols SXREF first the
+      same way the existing dlm branch already does) still runs before
+      patch()/dodata()/follow()/noops() assume every object is loaded.
+      noops()'s own lazy call to initdiv() stays as a no-op fallback
+      for anything the pre-scan somehow missed (guarded by initdiv()'s
+      own `if(prog_div != P) return;`) -- it no longer does the actual
+      library-pulling work itself, since that's provably unsafe once
+      patch() has already run (an earlier version of this fix that
+      called loadlib() straight from noops() got past "undefined:
+      _div" only to hit "illegal combination"/"bad rrr" span() errors
+      instead, from the just-loaded code having skipped patch()'s
+      branch resolution and dodata()/follow()'s passes entirely).
+
+  linkers/5lk/{main,noop}.c (the demoted kencc-reference lineage) has
+  the identical bug, unfixed -- not touched here since 5c/5l are this
+  project's default arm toolchain now, but worth knowing if 5lk is
+  ever exercised the same way.
+
+  See tests/c/regressions/arm_div_from_lib.c for the regression test
+  (checks both the -lXXX and the -l-plus-direct-.a-path forms, and
+  real runtime division/modulo results, not just "it linked").

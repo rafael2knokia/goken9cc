@@ -1,6 +1,7 @@
 #!/bin/sh
 #alt: #! /usr/bin/env bash
-set -eu # to debug this script add '-x'
+#config: to debug this script add also '-x' to the set below
+set -eu
 
 ###############################################################################
 # Prelude
@@ -9,15 +10,15 @@ set -eu # to debug this script add '-x'
 # of packages that are needed to then compile and install goken itself.
 #
 # The goal is also to use a single command that can work on all platforms:
-#  - Linux (Alpine for Docker, Ubuntu for Github Actions, Nix/Arch/...)
-#  - macOS (HomeBrew, Nix)
+#  - Linux (Alpine for Docker, Ubuntu for Github Actions, Arch/Nix/...)
+#  - macOS (native, HomeBrew, macPort, Nix)
 #  - Windows (Cygwin, Mingw, WSL)
 # and that setup everything (e.g., gcc/clang, mk/rc).
 #
 # This is reminescent of the classic "configure; make; make install"
 # trifecta of building and installing GNU packages, but adapted to the
 # new world of software development with powerful package managers and
-# software written using multiple programming languages.
+# software possibly written using multiple programming languages.
 #
 # This script currently assumes that gcc (and binutils) as well as
 # a few other utilities (e.g., make, bash) have already been installed.
@@ -33,14 +34,19 @@ set -eu # to debug this script add '-x'
 
 # Parse options
 SANITIZE=
+CCKIND=gcc
 for arg in "$@"; do
     case "$arg" in
         --asan)
             SANITIZE='-fsanitize=address'
             ;;
+        --clang)
+            CCKIND=clang
+            ;;
         --help|-h)
             echo "Usage: ./configure [options]"
             echo "  --asan    Build with AddressSanitizer (memory error detector)"
+            echo "  --clang   Bootstrap goken with clang instead of gcc"
             exit 0
             ;;
         *)
@@ -55,10 +61,10 @@ done
 ARCH=`uname -m`
 case "$ARCH" in
     x86_64)
-        GOARCH=amd64
+        CPUTYPE=amd64
         ;;
     aarch64 | arm64)
-        GOARCH=arm64
+        CPUTYPE=arm64
         ;;
     *)
         echo "Unsupported architecture: $ARCH" >&2
@@ -69,10 +75,13 @@ esac
 OS=`uname -s`
 case "$OS" in
     Linux)
-        GOOS=linux
+        OSTYPE=linux
         ;;
     Darwin)
-        GOOS=darwin
+        OSTYPE=darwin
+        ;;
+    CYGWIN*)
+        OSTYPE=cygwin
         ;;
     *)
         echo "Unsupported OS: $OS" >&2
@@ -87,9 +96,27 @@ echo 'Generating ./mkconfig'
 #old: now in mkfiles/mkfile.proto included from mkfiles/$objtype/mkfile
 #  CPUS=arm amd64 386
 #  OS=568
-echo "objtype=$GOARCH" > mkconfig
-echo "GOOS=$GOOS" >> mkconfig
-echo "GOARCH=$GOARCH" >> mkconfig
+#
+# objtype vs cputype vs ostype: objtype now selects a *build flavor*
+# mkfile (mkfiles/boot-gcc or mkfiles/boot-clang), not a CPU. Those
+# bootstrap mkfiles use the host C compiler (gcc/clang) to build goken
+# itself. cputype is the actual host CPU (amd64/arm64/...) and is what
+# ROOT/$cputype/{bin,lib} and the host-specific CFLAGS_ARCH are keyed
+# on. This split is what will let a future objtype=self-$cputype mkfile
+# set CC=$CC_ (e.g. 7c) to self-host goken with goken instead of gcc.
+# ostype is the host OS (linux/darwin/cygwin), the third leg of that
+# same "describe the build host" triple -- consumed by the handful of
+# mkfiles/scripts that need to know what host they're running on
+# (src/libmach/mkfile's $ostype.$O host stub, BOOT/lib9/mkfile's and
+# scripts/build-mk.sh's goos.c compile). GOOS is deliberately NOT
+# generated here: it means something different (the *target* OS of the
+# runtime a given libc.a/binary is built for, e.g. lib_core/libc/mkfile
+# cross-building for GOOS=darwin on a Linux host) and those mkfiles
+# already set/override it locally rather than relying on mkconfig, so
+# conflating it with the host-describing ostype here would be wrong.
+echo "objtype=boot-$CCKIND" > mkconfig
+echo "cputype=$CPUTYPE" >> mkconfig
+echo "ostype=$OSTYPE" >> mkconfig
 #still needed? used in golang
 #GOHOSTOS=linux
 #GOHOSTARCH=amd64

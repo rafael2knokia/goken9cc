@@ -1,5 +1,4 @@
 TOP=../..
-<$TOP/mkconfig
 <$TOP/mkfiles/$objtype/mkfile
 
 LIBNAME=libregexp.a
@@ -13,6 +12,6 @@ OFILES=\
 	rregexec.$O\
 	rregsub.$O\
 
-HFILES=	$TOP/include/regexp.h regcomp.h
+HFILES=	$TOP/include/ALL/regexp.h regcomp.h
 
 <$TOP/mkfiles/mksyslib

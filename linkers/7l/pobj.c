@@ -1,5 +1,5 @@
 #include	"l.h"
-#include	<ar.h>
+#include	<obj/ar.h>
 
 
 char	*noname		= "<none>";
@@ -98,12 +98,17 @@ objfile(char *file)
 		diag("%s: short read on archive file symbol header", file);
 		goto out;
 	}
-	if(strncmp(arhdr.name, symname, strlen(symname))) {
+	/* claude: memcmp/cast, not strncmp/bare arhdr.size -- arhdr's
+	 * fields are byte[] (raw archive-header bytes, include/obj/ar.h),
+	 * a hard type error under 7c (strncmp/atolwhex both take char*)
+	 * though gcc only warns. Same class of fix as linkers/ar/ar.c and
+	 * lib_toolchain/libmach/obj.c's own identical struct. */
+	if(memcmp(arhdr.name, symname, strlen(symname))) {
 		diag("%s: first entry not symbol header", file);
 		goto out;
 	}
 
-	esym = SARMAG + SAR_HDR + atolwhex(arhdr.size);
+	esym = SARMAG + SAR_HDR + atolwhex((char*)arhdr.size);
 	off = SARMAG + SAR_HDR;
 
 	/*
@@ -142,9 +147,9 @@ objfile(char *file)
 			l = read(f, &arhdr, SAR_HDR);
 			if(l != SAR_HDR)
 				goto bad;
-			if(strncmp(arhdr.fmag, ARFMAG, sizeof(arhdr.fmag)))
+			if(memcmp(arhdr.fmag, ARFMAG, sizeof(arhdr.fmag)))
 				goto bad;
-			l = atolwhex(arhdr.size);
+			l = atolwhex((char*)arhdr.size);
 			ldobj(f, l, pname);
 			if(s->type == SXREF) {
 				diag("%s: failed to load: %s", file, s->name);
@@ -408,7 +413,12 @@ lookup(char *symb, int v)
 		if(memcmp(s->name, symb, l) == 0)
 			return s;
 
-	s = halloc(sizeof(Sym));
+	/* claude: mallocz (zeroed), not plain malloc: only name/link/type/
+	 * version/value/sig are set below -- become/frame/subtype/file are
+	 * left implicitly zero (the old hunk arena handed back zeroed
+	 * memory; the real libc malloc doesn't). Same reasoning as sub.c's
+	 * own gethunk() removal comment. */
+	s = mallocz(sizeof(Sym), 1);
 	s->name = malloc(l + 1);
 	memmove(s->name, symb, l);
 

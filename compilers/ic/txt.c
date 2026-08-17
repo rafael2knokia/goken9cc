@@ -1,46 +1,13 @@
 #include "gc.h"
 
-static int32 ncast64[];
+static long ncast64[];
 
-//TODO: trick for ic and jc (32 ad 64 bits riscv)
-//extern void ccmain(int, char**);
-//void
-//main(int argc, char **argv)
-//{
-//	char *p;
-//	int oargc;
-//	char **oargv;
-//
-//	thechar = 'i';
-//	p = strrchr(argv[0], '/');
-//	if(p == nil)
-//		p = argv[0];
-//	else
-//		p++;
-//	if(*p == 'j')
-//		thechar = 'j';
-//	oargc = argc;
-//	oargv = argv;
-//	ARGBEGIN {
-//	case 'j':
-//		thechar = 'j';
-//		break;
-//	case 'o':
-//	case 'D':
-//	case 'I':
-//		p = ARGF();
-//	} ARGEND
-//	USED(p);
-//
-//	if(thechar == 'j'){
-//		thestring = "riscv64";
-//		ewidth[TIND] = 8;
-//	}else{
-//		thestring = "riscv";
-//		ewidth[TIND] = 4;
-//	}
-//	//ccmain(oargc, oargv);
-//}
+// ic/jc (32- and 64-bit riscv) dual-width selection: this used to be a
+// dedicated ic main() (below, now removed) that checked argv[0] and called
+// a separate ccmain() -- that split no longer exists, compilers/cck/lex.c's
+// shared main() now does everything main() used to do for every backend.
+// The argv[0]-basename check now lives there instead, before it calls
+// ginit() below, and ginit() picks up thechar from that.
 
 void
 ginit(void)
@@ -48,10 +15,37 @@ ginit(void)
 	int i;
 	Type *t;
 
-    // hardcoded i for now and skip main above
-	thechar = 'i';
-    thestring = "riscv";
-    ewidth[TIND] = 4;
+	// thechar is pre-set to 'j' (or left as its zero value) by
+	// compilers/cck/lex.c's main(), before it calls us, based on argv[0]'s
+	// basename -- the same ja/jl convention assemblers/ia and linkers/il
+	// use. Anything else defaults to 'i' (riscv32).
+	if(thechar == 'j'){
+		thestring = "riscv64";
+		ewidth[TIND] = 8;
+		// compilers/cck/lex.c's cinit() (called by main() right before us)
+		// already built the canonical types[TIND] = typ(TIND, types[TVOID])
+		// via typ(), which bakes in width = ewidth[TIND] *at that time* --
+		// i.e. gc.h's compile-time SZ_IND (4, the rv32 default) rather
+		// than our runtime override above. Any pointer type created from
+		// here on (e.g. by parsing "char *x") calls typ() fresh and gets
+		// the right width automatically, but this one object predates
+		// our override and stays stale unless patched directly. Found by
+		// comparing align()'s Aarg2 width for a function's own char*
+		// parameter (correct, 8: a fresh typ() after ginit()) against the
+		// same call's argument-layout width for a string-literal argument
+		// at the call site (wrong, 4) -- both etype==TIND, so the only
+		// explanation was two different Type objects, one predating this
+		// override. Confirmed unset width bugs like this compound: it
+		// broke stack-argument layout for variadic calls (tests/c/mini2),
+		// since a string-literal argument's phantom stack slot ended up
+		// only 4 bytes wide instead of 8, shifting every argument after
+		// it by 4 bytes.
+		types[TIND]->width = ewidth[TIND];
+	}else{
+		thechar = 'i';
+		thestring = "riscv";
+		ewidth[TIND] = 4;
+	}
 
 
 	exregoffset = REGEXT;
@@ -139,7 +133,7 @@ ginit(void)
 	if(thechar == 'i'){
 		com64init();
 	}else{
-		memmove(ncast, ncast64, NTYPE*sizeof(int32));
+		memmove(ncast, ncast64, NTYPE*sizeof(long));
 	}
 
 	for(i=0; i<nelem(reg); i++) {
@@ -1353,8 +1347,7 @@ gpseudo(int a, Sym *s, Node *n)
 	p->from.type = D_OREG;
 	p->from.sym = s;
 	if(a == ATEXT)
-		//goken: p->reg = (profileflg ? 0 : NOPROF);
-        p->reg = textflag;
+		p->reg = (profileflg ? 0 : NOPROF);
 	p->from.name = D_EXTERN;
 	if(s->class == CSTATIC)
 		p->from.name = D_STATIC;
@@ -1386,7 +1379,7 @@ sval(int32 v)
 	return 0;
 }
 
-int32
+long
 exreg(Type *t)
 {
 	int32 o;
@@ -1423,7 +1416,7 @@ schar	ewidth[NTYPE] =
 	SZ_VLONG,	/* [TUVLONG] */
 	SZ_FLOAT,	/* [TFLOAT] */
 	SZ_DOUBLE,	/* [TDOUBLE] */
-	0,		/* [TIND] - set to 4 or 8 in main */
+	SZ_IND,		/* [TIND] (rv32=4; ginit still overwrites for -j/rv64) */
 	0,		/* [TFUNC] */
 	-1,		/* [TARRAY] */
 	0,		/* [TVOID] */
@@ -1432,7 +1425,7 @@ schar	ewidth[NTYPE] =
 	SZ_INT,		/* [TENUM] */
 };
 
-int32	ncast[NTYPE] =
+long	ncast[NTYPE] =
 {
 	0,				/* [TXXX] */
 	BCHAR|BUCHAR,			/* [TCHAR] */
@@ -1456,7 +1449,7 @@ int32	ncast[NTYPE] =
 	0,				/* [TENUM] */
 };
 
-static int32 ncast64[NTYPE] =
+static long ncast64[NTYPE] =
 {
 	0,				/* [TXXX] */
 	BCHAR|BUCHAR,			/* [TCHAR] */

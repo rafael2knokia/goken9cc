@@ -1,0 +1,49 @@
+TOP=../..
+<$TOP/mkfiles/$objtype/mkfile
+
+LIBNAME=libmach.a
+
+#coupling: if you add a file, you probably need to extend Makefile too
+# note that there is no 6db.c because 8db.c is used to disassemble x86(_64)?
+OFILES=\
+        5.$O\
+	6.$O\
+	7.$O\
+	8.$O\
+	v.$O\
+	5db.$O\
+	7db.$O\
+	8db.$O\
+	vdb.$O\
+	5obj.$O\
+	6obj.$O\
+	7obj.$O\
+	8obj.$O\
+	iobj.$O\
+	vobj.$O\
+	vcodas.$O\
+        \
+	obj.$O\
+	swap.$O\
+	setmach.$O\
+	executable.$O\
+	map.$O\
+	sym.$O\
+	access.$O\
+	machdata.$O\
+        \
+	linux.$O\
+
+HFILES=	$TOP/include/arch/mach.h\
+	$TOP/include/arch/arm/ureg.h\
+	$TOP/include/arch/arm64/ureg.h\
+	$TOP/include/arch/386/ureg.h\
+	$TOP/include/arch/amd64/ureg.h\
+	$TOP/include/arch/mips/ureg.h\
+	bootexec.h\
+	elf.h\
+
+
+#	$TOP/include/a.out.h\
+
+<$TOP/mkfiles/mksyslib

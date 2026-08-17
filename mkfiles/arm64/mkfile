@@ -1,21 +1,19 @@
 <$TOP/mkfiles/mkfile.proto
 
-# flags explanations:
-# - the -signed-char is needed otherwise compilers/8c/mul.c will be buggy
-#   see https://abstractexpr.com/2023/04/30/the-anomaly-of-the-char-type-in-c/
-# - the --std=gnu89 is needed because recent gcc have too many warnings
-#   by default that prevents to compile goken
-# - the -Wno-cpp to avoid certain errors
-#alt: CC=quietgcc -c ...
-CC=gcc -c --std=gnu89 -Wno-cpp -fsigned-char
-LD=gcc
-AS=gcc
-O=o
-#LATER: principia: alt: CC=6c LD=6l O=6 AS=6a
+# the goken cross-toolchain itself: used by tests/ (mk objtype=arm64) and,
+# once self-hosting is viable, as CC/AS/LD for the top-level build too
+O=7
+# 7c never auto-searches /usr/include (unlike gcc), so this needs an
+# explicit -I for the arch's own u.h; $CFLAGS_COMMON (mkfile.proto) adds
+# the shared include/include/ALL/. search path
+CFLAGS=$CFLAGS_COMMON -I$TOP/include/arch/arm64
+CC=7c
+LD=7l
+AS=7a
+AR=iar
 
-# used in tests/
-O_=7
-CC_=7c
-LD_=7l
-AS_=7a
-AR_=ar_
+# see mkfiles/386/mkfile's own ARCHEXTRAOFILES comment. No vlop/div/
+# getcallerpc entry needed here (64-bit-native, no software vlong
+# emulation -- see lib_core/libc/mkfile's own CFLAGS comment), but
+# setjmp.s is still needed on every arch, this one included.
+ARCHEXTRAOFILES=arch/arm64/setjmp.$O

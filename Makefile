@@ -1,6 +1,8 @@
 ###############################################################################
 # Prelude
 ###############################################################################
+# Thin wrappers around mk as people (including myself) are more used to
+# run 'make' than 'mk'
 
 ###############################################################################
 # Main targets
@@ -12,7 +14,6 @@ install:
 	mk install
 clean:
 	mk clean
-
 test:
 	mk test
 
@@ -27,7 +28,9 @@ build-docker-test:
 build-docker-principia: 
 	docker build -f Dockerfile --build-arg NPROC=`nproc` --tag goken9cc-principia --target principia .
 
-# need 'docker login -u padator' first with credentials of
+# This padator/goken image is used in principia
+# (see https://github.com/aryx/principia-softwarica/blob/master/Dockerfile)
+# This target needs 'docker login -u padator' first with credentials of
 # https://hub.docker.com/r/padator/ stored in ~/.docker/config.json
 # See ocaml-light/Makefile for more info
 push-docker:
@@ -46,12 +49,12 @@ build-alpine:
 ###############################################################################
 
 gotest:
-	cd src; ./run.bash
+	cd GO; ./run.bash
 
 #TODO: hello_web.exe but more complicated to test and hello_draw.exe too
 #TODO: we should use cmp.out to ensure the output is correct
 hellogotest:
-	cd tests; make; ./hello_go.exe; ./hello_unicode.exe; ./hello_goroutine.exe
+	cd tests/go/hello; make; ./hello_go.exe; ./hello_unicode.exe; ./hello_goroutine.exe
 
 ###############################################################################
 # Pad's targets

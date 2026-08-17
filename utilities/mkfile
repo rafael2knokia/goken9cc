@@ -1,5 +1,4 @@
 TOP=..
-<$TOP/mkconfig
 
 DIRS=archive byte calc compare files misc pipe text time kernel
 
@@ -15,13 +14,12 @@ SRC_VIEWS=\
   files/rm.c files/cp.c files/mv.c \
   files/chmod.c files/chgrp.c \
   files/mtime.c \
+  files/pwd.c \
   files/wc.c files/du.c \
   pipe/p.c pipe/mc.c pipe/tail.c pipe/tee.c pipe/xargs.c \
   byte/xd.c byte/dd.c byte/split.c \
   time/date.c time/cal.c \
   misc/basename.c misc/file.c misc/iconv.c misc/strings.c misc/unicode.c \
-  compare/diff/diff.h compare/diff/main.c \
-  compare/diff/diffio.c compare/diff/diffdir.c  compare/diff/diffreg.c \
   compare/misc/cmp.c compare/misc/comm.c \
   archive/tar/tar.c \
   archive/gzip/gzip.h archive/gzip/gzip.c archive/gzip/gunzip.c \
@@ -31,15 +29,22 @@ SRC_VIEWS=\
   text/misc/tr.c text/misc/sed.c \
   text/grep/main.c text/grep/grep.h text/grep/sub.c text/grep/grep.y \
   text/grep/comp.c text/grep/globals.c \
-  text/awk/awk.h  text/awk/proto.h text/awk/awkgram.y text/awk/lex.c text/awk/lib.c \
-  text/awk/main.c text/awk/maketab.c text/awk/parse.c text/awk/re.c text/awk/run.c \
-  text/awk/tran.c
+
+#TODO: awk must be relpized after the removal use of APE in it (by Ori)
+#  text/awk/awk.h  text/awk/proto.h text/awk/awkgram.y text/awk/lex.c text/awk/lib.c \
+#  text/awk/main.c text/awk/maketab.c text/awk/parse.c text/awk/re.c text/awk/run.c \
+#  text/awk/tran.c
 #old: text/misc/ed.c now synced separately with ed.nw in
 # text/misc/mkfile
+#TODO? or leave in VCS.nw?
+#  compare/diff/diff.h compare/diff/main.c \
+#  compare/diff/diffio.c compare/diff/diffdir.c  compare/diff/diffreg.c \
 
 
 sync:VI:
 	for (i in $SRC_VIEWS) {
 	   if (~ $i y.tab.[ch]) echo skipping $i
-	   if not  syncweb -no_cache -verbose -md5sum_in_auxfile -less_marks -lang C $TOP/principia/utilities/Utilities.nw $TOP/principia/utilities/Utilities_extra.nw  $i
+	   if not {
+	     syncweb -no_cache -verbose -md5sum_in_auxfile -less_marks -lang C $TOP/principia/utilities/Utilities.nw $TOP/principia/utilities/Utilities_extra.nw  $i
+	   }
         }

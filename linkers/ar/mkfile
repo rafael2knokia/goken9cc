@@ -1,16 +1,11 @@
 TOP=../..
-<$TOP/mkconfig
 <$TOP/mkfiles/$objtype/mkfile
 
 TARG=iar	# inferno archiver
-LDLIBS=-lmach -lbio -l9 -lm
+LDLIBS=-lmach -lbio $BOOTLIBS
 
 OFILES=	ar.$O\
 
-#	$TARGMODEL.$O\
-
-HFILES=	$TOP/include/bio.h $TOP/include/mach.h
-
-#$TOP/include/a.out.h\
+HFILES=	$TOP/include/ALL/bio.h $TOP/include/ALL/mach.h
 
 <$TOP/mkfiles/mkone

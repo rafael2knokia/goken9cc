@@ -190,7 +190,7 @@ garg1(Node *n, Node *tn1, Node *tn2, int f, Node **fnxp)
 			sugen(n, tn2, n->type->width);
 		return;
 	}
-	if(REGARG && curarg == 0 && typechlp[n->type->etype] && !debug['X']) {
+	if(REGARG && curarg == 0 && typechlp[n->type->etype]) {
 		regaalloc1(tn1, n);
 		if(n->complex >= FNX) {
 			cgen(*fnxp, tn1);
@@ -290,8 +290,6 @@ regalloc(Node *n, Node *tn, Node *o)
 			if(i > 0 && i < NREG)
 				goto out;
 		}
-       if(!debug['X']) {
-
 		j = lasti + REGRET+1;
 		for(i=REGRET+1; i<NREG; i++) {
 			if(j >= NREG)
@@ -302,14 +300,6 @@ regalloc(Node *n, Node *tn, Node *o)
 			}
 			j++;
 		}
-       } else {
-        // pad's XiX compliant simpler code
-		for(i=0; i<NREG; i++) {
-			if(reg[i] == 0) { // && resvreg[i] == 0) {
-				goto out;
-			}
-		}
-       }
 		diag(tn, "out of fixed registers");
 		goto err;
 
@@ -1349,8 +1339,7 @@ gpseudo(int a, Sym *s, Node *n)
 	p->from.type = D_OREG;
 	p->from.sym = s;
 	if(a == ATEXT)
-		//kengo: was before: p->reg = (profileflg ? 0 : NOPROF);
-	        p->reg = textflag;
+		p->reg = (profileflg ? 0 : NOPROF);
 	p->from.name = D_EXTERN;
 	if(s->class == CSTATIC)
 		p->from.name = D_STATIC;
@@ -1382,7 +1371,7 @@ sval(int32 v)
 	return 0;
 }
 
-int32
+long
 exreg(Type *t)
 {
 	int32 o;
@@ -1428,7 +1417,7 @@ schar	ewidth[NTYPE] =
 	SZ_INT,		/* [TENUM] */
 };
 
-int32	ncast[NTYPE] =
+long	ncast[NTYPE] =
 {
 	0,				/* [TXXX] */
 	BCHAR|BUCHAR,			/* [TCHAR] */

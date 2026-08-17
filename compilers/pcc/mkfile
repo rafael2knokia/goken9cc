@@ -1,9 +1,9 @@
 TOP=../..
-<$TOP/mkconfig
 <$TOP/mkfiles/$objtype/mkfile
 
 TARG=pcc
-LDLIBS=-l9
+# claude: no LDLIBS=$BOOTLIBS here -- see utilities/time/mkfile's
+# identical comment (mkfiles/mkone now appends $BOOTLIBS directly).
 
 OFILES=pcc.$O
 

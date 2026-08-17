@@ -1,0 +1,236 @@
+The mips toolchain (va/vc/vl): what the 9front unification landed
+====================================================================
+
+Notes on va/vc/vl's codegen/ABI internals, ported from 9front during
+the July 2026 "big unification" pass. This is the arch where that
+unification effort started (the smallest diff of the three 9front-
+sourced archs -- see arm64's and riscv's own notes_arch_*.txt for the
+larger diffs found there), so several fixes below turned out to have
+identical siblings in arm64/riscv once those were checked, which is
+noted inline. See plan9front.txt's mips section and todo.org's "mips
+toolchain" section (entirely open items, not repeated here), and
+assemblers/va/, compilers/vc/, linkers/vl/.
+
+va: a stack buffer overflow shared with 7a
+------------------------------------------------
+
+assemble()'s filename handling copied its argument into a fixed
+`char ofile[100]` with a raw strcpy() and no bounds check -- confirmed
+to crash ("*** stack smashing detected ***", SIGABRT) on a source path
+100 bytes or longer. Ported 9front's fix: size the buffer dynamically
+via strdup()/smprint() instead. The exact same bug, independently, was
+later found in 7a (arm64) when a feature-test file happened to live at
+a long scratch path -- see docs/claude_notes/notes_arch_arm64.txt. See
+tests/s/regressions/mips_long_filename.s.tmpl.
+
+LL/SC/SYNC: the atomic primitives spinlocks need
+------------------------------------------------------
+
+va/vc/vl had no support at all for LL (load-linked), SC (store-
+conditional), or SYNC (memory barrier) -- the primitives MIPS spinlock/
+mutex/CAS-loop code is built on. Ported from four separate 9front
+commits by mia soweli (10f1eeb7d, ca2589a11, e7d099ac4, 2eb28f43e),
+covering both the initial LL/SC/SYNC opcodes themselves and two
+follow-up fixes to LL's own operand order and instruction scheduling
+in the linker. See tests/s/features/mips_atomic_llsc.s.
+
+vl's scheduler could hoist a load across a stack adjustment
+------------------------------------------------------------------
+
+The linker's instruction scheduler could reorder a stack-pointer-
+adjusting instruction to *after* an earlier load in the same
+scheduling window, changing that load's effective address once the
+reorder actually happened (the load computed its address relative to
+SP before the adjustment; after hoisting, SP has already moved).
+Ported from 9front's sys/src/cmd/vl/sched.c (cinap_lenrek,
+40ed531364), found there via a real libmemdraw bug on 9front itself.
+No dedicated minimal test exists in this repo yet for this one --
+see linkers/vl/sched.c's sched().
+
+vc: three register-allocator/codegen carve-outs, one real correctness bug
+--------------------------------------------------------------------------------
+
+See docs/claude_notes/notes_shared_frontend_bugs.txt for the full
+per-backend status table of the three items below (which of 5c/6c/8c/ic
+also have each one, verified directly from source) -- this section
+only covers what's specific to vc/mips.
+
+- regopt()'s fixed `Rgn region[600]` array gave up (warn + stop
+  optimizing, not a crash) past 600 candidate regions. Ported 9front's
+  growable version (starts at 300, doubles via allocn() as needed).
+  The identical fix, independently confirmed necessary, landed in 7c
+  (arm64) too -- see docs/claude_notes/notes_arch_arm64.txt.
+
+- mkvar() excluded every "."-prefixed pseudo-symbol from register-
+  allocator tracking, including ".ret" (the function return-value
+  pseudo-variable). Ported 9front's carve-out so ".ret" specifically
+  stays eligible for optimization like any other variable. Missed
+  optimization, not a correctness bug -- same shape as 7c's identical
+  fix.
+
+- cgen()'s OFUNC case didn't strip a leading comma expression from the
+  callee before checking it's a plain indirect call (`l->op ==
+  OIND`), so a function pointer reached through something like
+  `(sideeffect(), fp)(args)` hit `diag(n, "bad function call")` or
+  miscompiled. Fixed with `l = uncomma(l);` -- uncomma() already
+  exists in shared cc/ code, and 7c/8c/8ck already had this exact
+  call, making vc the odd one out among this project's own backends
+  (6c later turned out to be missing it too -- see
+  docs/claude_notes/notes_arch_amd64.txt).
+
+- align()'s Aaut3 case ("total align of automatic") never set `w`, so
+  stack "safe" spill-temp regions (regsalloc(), used e.g. when
+  marshaling a call whose own argument contains another call) weren't
+  rounded up to a MIPS word, skewing the whole function's frame size
+  by a non-word amount. This is the one **real correctness bug** in
+  this file, not a missed optimization. 5c/7c (arm/arm64) already
+  carried the fix, imported independently from principia-softwarica
+  rather than from 9front; ported the same one-line fix to vc. 9front
+  found and fixed the identical bug in their own vc independently
+  (e8c8f5d82) -- three unrelated lineages converging on the same fix
+  is a reasonable signal it's a real, not cosmetic, bug. See
+  tests/c/regressions/mips_aut3_align.c.
+
+The fnuxi8[] float-constant bug: shared with riscv, see its own notes
+---------------------------------------------------------------------------
+
+vl (and il, riscv) were the only two linkers still writing a 4-byte
+float constant via `cast[fnuxi8[i+4]]` instead of `cast[fnuxi8[i]]`
+like every other backend -- a 4-byte stack overread that corrupts the
+stored bits of any `float` (not `double`) global/static initializer.
+Not diff-derived at all; found by cross-arch consistency while
+reviewing this pair of backends together. mips's own vl build has the
+identical defect but happened not to manifest it in the test used
+(confirmed by reverting the fix and rebuilding -- same code path,
+coincidentally benign stack garbage that time) -- fixed here anyway on
+the strength of the riscv repro and the fix being verbatim what every
+other backend already does. Full story, including why riscv is what
+actually surfaced it, in docs/claude_notes/notes_arch_riscv.txt. See
+tests/c/regressions/float_const_oob.c.
+
+vl's objfile(): -lXXX ignored -L entirely, always resolved to /usr/vlib
+---------------------------------------------------------------------------
+
+linkers/vl/obj.c's objfile() resolved a `-lXXX` link argument by
+building `/usr/$Xlib/libXXX.a` (or `/$plan9/lib/libXXX.a` under -9)
+directly, never consulting `libdir[]` (the `-L` list `-L` flags
+populate) at all -- so `-L../../ROOT/arch/mips/lib -lc` silently
+ignored the `-L` and looked for `/usr/vlib/libc.a` instead, which
+doesn't exist on this project's Linux hosts, failing with "cannot open
+file". linkers/7l/pobj.c's own objfile() already does this correctly
+(builds `libXXX.a`, calls `findlib()` to search `libdir[]`, diags out
+only if genuinely not found anywhere on the list) -- ported that same
+shape into vl/obj.c verbatim, dropping the old hardcoded-path fallback
+(nothing in this tree relied on it: grepping for any existing `vl
+-lXXX` usage found none before this fix). Found while linking
+lib_core/libc's mips libc.a into tests/c/hello_libc's hello.exe -- see
+notes_libc_selfhost.txt. Verified via tests/c/vlong's own multi-arch
+test (which also does `vl -L. -lc`-shaped linking) still passing after
+the fix, plus the new hello_libc mips case actually finding the
+library instead of falling through to the dead default path.
+
+Calling convention: only the first argument is register-passed (R1); rest pack tight
+------------------------------------------------------------------------------------------
+
+Confirmed via `vc -S` on throwaway probes (both reading a fixed-arg
+function's own FP offsets, and what happens when `&firstarg` is
+explicitly taken): like arm64 (see notes_arch_arm64.txt), only the
+*first* named parameter arrives in a register (R1 here, not spilled to
+its FP+0 home slot unless the compiler-generated function's own
+address-taken code needs it there) -- a hand-written function reading
+the compiler's own calling convention (see
+lib_core/libc/syscall/arch/mips/svc.s's `_syscall6`) must read it from
+R1 directly, the same reasoning as arm64's svc.s.
+
+Unlike arm64/amd64 though, every argument *after* the first packs at
+its exact natural sizeof() width, with zero padding -- confirmed by
+placing a `double` right after two `int` args and finding it lands
+exactly 8 bytes along, not padded to some larger alignment. (This
+extends to genuinely no alignment enforcement at all: one probe placed
+a `double` at a 4-byte-only-aligned offset, and the compiler emitted a
+plain `MOVD` there anyway -- whether that's actually safe on real o32
+MIPS hardware, or just usually gets away with it under this project's
+own qemu-mips-only testing, wasn't investigated further.) This is also
+why the first argument's *un-populated* home slot still reserves 4
+bytes at FP+0: the second argument starts at FP+4, not FP+0 -- already
+relied on, unremarked, by tests/c/mini2/linux_mips.s's own write()
+stub (`buf+4(FP)`). include/arch/mips/u.h's va_list macros, adapted
+directly from principia's already-validated include/arch/mips/u.h,
+reflect this natural-packing rule exactly.
+
+Also worth flagging for future syscalls: real o32 Linux syscalls with
+a 5th/6th argument need those on the caller's *stack*, not a register
+(o32 only has 4 argument registers, A0-A3/R4-R7) -- a wrinkle unique to
+mips among the arches this project's lib_core/libc covers so far. Not
+implemented in svc.s since neither syscall needed this pass (write,
+exit) takes more than 3 args; see that file's own comment.
+
+Found while building lib_core/libc for mips -- see
+notes_libc_selfhost.txt for the fuller story, including the two other
+(non-mips-specific) bugs the same effort surfaced: the com64.c OCOND/
+OLIST gap (notes_shared_frontend_bugs.txt) and the missing-return
+6c-only compile error in the fmt/*.c files shared with every other
+arch here.
+
+The o32 error convention: $a3, not a negative return
+---------------------------------------------------------
+
+The single most surprising thing about mips syscalls here, and unique
+to this arch among the seven Linux targets: o32 does NOT signal errors
+by returning a negative value. Every other arch in this tree
+(386/amd64/arm/arm64/riscv/riscv64) returns -errno directly in the
+result register, so a C caller's `if(fd < 0)` works with no help. o32
+instead splits it:
+
+  $v0 (R2)  the result on success -- or a POSITIVE errno on failure
+  $a3 (R7)  0 on success, 1 on failure
+
+So the errno value alone is ambiguous: 2 could be a valid fd or
+ENOENT, and only R7 distinguishes them. A trampoline that reads only
+$v0 will report every failure as a plausible small success.
+
+That is exactly the bug lib_core/libc/syscall/os/linux/svc_mips.s had
+until July 2026: open() on a missing file returned +2, which is >= 0,
+so every error check in libc silently passed on this arch alone. Fixed
+by branching on R7 and negating $v0 into the return register, so the
+trampoline hands up the same negative-errno convention every other
+arch already produces and nothing above it needs an #ifdef mips:
+
+  SYSCALL
+  MOVW  R2, R1        // this compiler returns via R1, not $v0
+  BEQ   R7, ok        // R7==0: success, keep the result
+  SUBU  R2, R0, R1    // else negate: R1 = 0 - $v0 = -errno
+ ok:
+  RET
+
+(R0 is mips's hardwired zero register, include/obj/v.out.h's REGZERO;
+this assembler writes "dst = src1 - src2" as `SUBU src2, src1, dst`,
+and its BEQ takes a single register operand, branch-if-zero.)
+
+Found by tests/c/hello_libc/dir.c, the first test here to check a
+failing syscall's return value at all -- see notes_libc_selfhost.txt
+for why that class of bug survived three separate passes over this
+file, and notes_debug_techniques.txt for the qemu-mips -strace
+technique that separated "the kernel did the wrong thing" from "the
+kernel did the right thing and the trampoline mis-reported it".
+
+What's landed vs. what todo.org still lists as open
+---------------------------------------------------------
+
+Everything above is done. todo.org's own "mips toolchain" section is,
+unusually, entirely pending items rather than a landed/pending split --
+worth knowing before assuming a TODO title implies nothing shipped
+yet for this arch: a dead little-endian-mips flag cleanup; extending
+the growable-allocator and macexpand()-overflow fixes (already applied
+elsewhere in this tree) to va/cck's shared macro-expansion code; a
+wrong regalloc template in vc's constant compound-assign fast path
+(low-risk one-liner, not yet landed); making the shared struct-copy
+scratch temp (nodrat) reentrant, a real correctness bug this project's
+every C backend shares (see docs/claude_notes/notes_arch_amd64.txt's closing
+paragraph); a dropped-warning cosmetic fix; ELF64/MIPSR4K (64-bit
+MIPS) support, entirely unimplemented (elf64()/MIPSR4K already exist
+in the shared linkers/lk/elf.h and are used by other linkers, but vl
+never calls them); honoring DUPOK on data symbols in datblk(); and
+replacing unbounded sprint() calls in vl/list.c and vl/pass.c with
+snprint(), the same bug class as va's already-fixed stack overflow
+above, not yet observed to crash but matching the pattern.

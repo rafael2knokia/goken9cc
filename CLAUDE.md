@@ -44,6 +44,7 @@ Plan 9 uses single-character codes for architectures. Each tool is prefixed with
 | 6 | amd64 | 6c | 6a | 6l | .6 |
 | v | mips | vc | va | vl | .v |
 | i | riscv | ic | ia | il | .i |
+| e | wasm | *(TODO)* | ea | el | .e |
 
 Pipeline: `.c` → compiler (`Xc`) → assembler (`Xa`) → linker (`Xl`) → `X.out`
 
@@ -54,9 +55,10 @@ Pipeline: `.c` → compiler (`Xc`) → assembler (`Xa`) → linker (`Xl`) → `X
 - **linkers/** — per-arch linkers + `ar` archiver
 - **lib_core/** — `lib9/` (Plan 9 POSIX adaptation), `libbio/` (buffered I/O), `libc/` (minimal C lib with OS/ and ARCH/ branches)
 - **lib_strings/** — `libregexp/`, `libstring/`, `libflate/`
+- **lib_toolchain/** — `libmach/` (object file/binary format parsing, used by `ar`, `acid`, and the emulators — not just debuggers)
 - **include/** — master headers (`u.h`, `libc.h`, `bio.h`, `mach.h`), plus `ARCH/` and `OS/` subdirs
 - **machines/** — `5i` (ARM emulator), `vi` (MIPS emulator)
-- **debuggers/** — `acid` (Plan 9 debugger), `libmach` (debug support)
+- **debuggers/** — `acid` (Plan 9 debugger)
 - **generators/** — `lex`, `yacc`
 - **mk/** — Plan 9 mk build tool (bootstrapped from shell)
 - **rc/** — Plan 9 rc shell
@@ -88,6 +90,22 @@ Pipeline: `.c` → compiler (`Xc`) → assembler (`Xa`) → linker (`Xl`) → `X
 - `RCMAIN` — rc init file path
 - `YACCPAR` — yacc template file path
 
+## Coding Conventions
+
+- **Avoid `#ifdef`.** Follow the Plan 9 authors' habit of selecting
+  *files* in the build system rather than branching inside the source.
+  This is what the per-OS/per-arch directory splits already exist for:
+  `lib_core/libc/{port,os/$GOOS,arch/$cputype}/`,
+  `syscall/os/$GOOS/`, `mkfiles/$objtype/`. In particular
+  `lib_core/libc/port/` must hold only clean portable code — if a
+  `port/` file would need a `#ifdef plan9`/`#ifdef windows`, exclude it
+  from that GOOS's build instead (see `lib_core/libc/mkfile`'s
+  `PORTPOSIXOFILES`, which does this with an mk backquote on `$GOOS`).
+- Note the goken compilers' preprocessor has **no `#if` expression
+  support at all** (`#if defined(X) || defined(Y)` fails with
+  "unknown #: if") — only plain `#ifdef`/`#ifndef`/`#else`/`#endif`,
+  which have to be nested. Another reason to prefer file selection.
+
 ## Syncweb Markers
 
 **DO NOT modify** `/*s: ... */`, `/*e: ... */`, or `/*x: ... */` comments in source files.
@@ -97,3 +115,77 @@ These are syncweb chunk markers linking source code to the Noweb documentation i
 
 - `docs/iwp9/iwp9.nw` — main book ("Goken: The Plan 9 Toolchain Reborn")
 - `docs/*.pdf` — historical Plan 9 documentation (asm, compiler, mk, rc, yacc, acid)
+
+## Claude engineering notes (docs/claude_notes/)
+
+Working notes gathered while bringing up or fixing a specific area,
+written for a future Claude session to read before touching that area
+again — not user-facing documentation. Organized along a few axes,
+each with its own filename prefix:
+- `notes_exec_{macho,pe,elf}.txt` — executable-*format* internals
+  (headers, sections, load commands) for a target OS.
+- `notes_arch_{arm,arm64,x86,amd64,mips,riscv}.txt` — codegen/ABI
+  internals for one arch's compiler/assembler/linker.
+- `notes_os_{macos,linux,windows,plan9,xv6}.txt` — building and
+  running goken *itself* on that OS as a host (as opposed to
+  `notes_exec_*`, which is about binaries goken produces *for* that
+  OS). Several of these are placeholders reflecting real project
+  state (e.g. Plan 9/xv6 as build hosts are still TODO) — that's
+  intentional, not a gap to fill preemptively.
+- `notes_abi_plan9.txt` — Plan 9's native syscall ABI and running -H2
+  binaries under the 5i/vi emulators; the one syscall convention that
+  isn't tied to any of the exec-format files above.
+- `notes_shared_frontend_bugs.txt` — a per-backend status table for
+  bugs that recur across 5c/6c/7c/8c/vc/ic because their cgen.c/reg.c
+  look shared but have diverged independently; update this table
+  (verify from source, not from memory) whenever you land or find one
+  of these instead of re-describing the same bug in a new arch file.
+- `notes_test_infra.txt` — the testing *methodology* itself
+  (qemu-runner vs binfmt_misc, golden-diffing, cross-lineage corpus
+  comparison, wine/darling/wasm-runner) as opposed to any one test.
+- `notes_debug_techniques.txt` — *debugging* methodology (as opposed
+  to `notes_test_infra.txt`'s test-running methodology): differential
+  tracing against a reference compiler, progressive source
+  minimization, the `7c -N`/`-R`/`-g` flags for isolating which pass
+  introduced a bug, reading compiler warnings (visible by default; `-q`
+  silences them), and macOS-host-specific gotchas (Falcon quarantine
+  vs. a plain wrong-cwd bug looking identical). Read before a long
+  debugging session, not just after one.
+- `notes_libmach.txt` — lib_toolchain/libmach's own object-format
+  parsing story, shared by iar/acid/5i/vi.
+- `notes_wasm.txt` — the ea/ec/el design (wasm is architecture and
+  executable format in one, hence no separate `notes_exec_wasm.txt`).
+
+A second, rarer prefix records *forward-looking* work, as an explicit
+exception to the "done, verified work" rule below:
+- `plan_*.txt` — the analysis behind a not-yet-started body of work:
+  the ordering, the alternatives weighed, and any reference tables
+  transcribed from primary sources, so a future session doesn't
+  re-derive them. Currently just `plan_syscalls.txt` (which syscalls
+  `lib_core/libc/syscall/` should grow next, with per-OS/arch number
+  tables). Still not a TODO list — `todo.org` stays the authority on
+  priorities; a `plan_` file only orders work within its own area, and
+  should say where its numbers/claims came from. When the work lands,
+  fold the outcome into the matching `notes_*` file.
+
+Conventions:
+- Keep content in the file whose axis it actually belongs to (format
+  vs. arch vs. host-OS vs. syscall-ABI vs. cross-cutting bug pattern
+  vs. test methodology vs. a specific shared library) rather than
+  duplicating it, and cross-reference the sibling file instead.
+- Concerned with **done, verified work** — the bug, the root cause,
+  the fix, how it was tested — not open TODOs; point at `todo.org` for
+  what's still pending rather than restating it.
+- Before starting similar work in a new area (a new arch, a new OS
+  target, a new exec format, a new shared library), check whether a
+  note already exists for it and read it first.
+- When starting genuinely new, substantial work in an area with no
+  existing note, create one following this same structure — including
+  a new axis/prefix if the content genuinely doesn't fit an existing
+  one, the way `notes_abi_*`/`notes_shared_frontend_bugs`/
+  `notes_test_infra`/`notes_debug_techniques`/`notes_libmach` were
+  added alongside the original `notes_exec_*`/`notes_arch_*`/
+  `notes_os_*` split.
+- Also worth updating specifically: `notes_debug_techniques.txt`,
+  whenever a debugging *session* (not just the bug it found) surfaces
+  a technique reusable beyond that one bug.

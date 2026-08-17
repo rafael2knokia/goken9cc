@@ -1,10 +1,11 @@
 /*
  * ar - portable (ascii) format version
  */
-#include <lib9.h>
+#include <u.h>
+#include <libc.h>
 #include <bio.h>
-#include <mach.h>
-#include <ar.h>
+#include <arch/mach.h>
+#include <obj/ar.h>
 
 /*
  *	The algorithm uses up to 3 temp files.  The "pivot member" is the
@@ -67,7 +68,7 @@ typedef struct Hashchain
 
 		/* constants and flags */
 char	*man =		"mrxtdpq";
-char	*opt =		"uvnbailo";
+char	*opt =		"uvnbailoD";
 char	artemp[] =	"/tmp/vXXXXX";
 char	movtemp[] =	"/tmp/v1XXXXX";
 char	tailtemp[] =	"/tmp/v2XXXXX";
@@ -79,6 +80,11 @@ int	cflag;
 int	oflag;
 int	uflag;
 int	vflag;
+/* claude: 'D' = deterministic archives, like GNU ar -D: zero dates and
+ * constant modes so archive bytes do not depend on build time (used by
+ * the principia mkfiles for reproducible builds; was previously
+ * hardcoded, see the git history of the //PAD: comments) */
+int	Dflag;
 
 Arfile *astart, *amiddle, *aend;	/* Temp file control block pointers */
 int	allobj = 1;			/* set when all members are object files of the same type */
@@ -166,6 +172,7 @@ main(int argc, char *argv[])
 		case 'u':	uflag = 1;	break;
 		case 'v':	vflag = 1;	break;
 		case 'x':	setcom(xcmd);	break;
+		case 'D':	Dflag = 1;	break;
 		default:
 			fprint(2, "ar: bad option `%c'\n", *cp);
 			exits("error");
@@ -355,7 +362,7 @@ xcmd(char *arname, int count, char **files)
 	i = 0;
 	while (bp = getdir(&bar)) {
 		if(count == 0 || match(count, files)) {
-			mode = strtoul(bp->hdr.mode, 0, 8) & 0777;
+			mode = strtoul((char*)bp->hdr.mode, 0, 8) & 0777;
 			f = create(file, OWRITE, mode);
 			if(f < 0) {
 				fprint(2, "ar: %s cannot create\n", file);
@@ -696,16 +703,16 @@ getdir(Biobuf *b)
 		free(bp);
 		return 0;
 	}
-	if(strncmp(bp->hdr.fmag, ARFMAG, sizeof(bp->hdr.fmag)))
+	if(memcmp(bp->hdr.fmag, ARFMAG, sizeof(bp->hdr.fmag)))
 		phaseerr(Boffset(b));
-	strncpy(name, bp->hdr.name, sizeof(bp->hdr.name));
+	memmove(name, bp->hdr.name, sizeof(bp->hdr.name));
 	cp = name+sizeof(name)-1;
 	while(*--cp==' ')
 		;
 	cp[1] = '\0';
 	file = name;
-	bp->date = atol(bp->hdr.date);
-	bp->size = atol(bp->hdr.size);
+	bp->date = atol((char*)bp->hdr.date);
+	bp->size = atol((char*)bp->hdr.size);
 	return bp;
 }
 /*
@@ -714,23 +721,23 @@ getdir(Biobuf *b)
 void
 armove(Biobuf *b, Arfile *ap, Armember *bp)
 {
-	char *cp;
+	byte *cp;
 	Dir *d;
 
 	if ((d = dirfstat(Bfildes(b))) == nil) {
 		fprint(2, "ar: cannot stat %s: %r\n", file);
 		return;
 	}
-	trim(file, bp->hdr.name, sizeof(bp->hdr.name));
-	for (cp = strchr(bp->hdr.name, 0);		/* blank pad on right */
+	trim(file, (char*)bp->hdr.name, sizeof(bp->hdr.name));
+	for (cp = memchr(bp->hdr.name, 0, sizeof(bp->hdr.name));	/* blank pad on right */
 		cp < bp->hdr.name+sizeof(bp->hdr.name); cp++)
 			*cp = ' ';
-	sprint(bp->hdr.date, "%-12ld", 0);//PAD: d->mtime); for reproducible builds
-	sprint(bp->hdr.uid, "%-6d", 0);
-	sprint(bp->hdr.gid, "%-6d", 0);
-	sprint(bp->hdr.mode, "%-8lo", 0644); //PAD: d->mode); for reproducible builds
-	sprint(bp->hdr.size, "%-10lld", (vlong)d->length);
-	strncpy(bp->hdr.fmag, ARFMAG, 2);
+	sprint((char*)bp->hdr.date, "%-12ld", Dflag ? 0 : (long)d->mtime);
+	sprint((char*)bp->hdr.uid, "%-6d", 0);
+	sprint((char*)bp->hdr.gid, "%-6d", 0);
+	sprint((char*)bp->hdr.mode, "%-8lo", Dflag ? 0644 : (long)d->mode);
+	sprint((char*)bp->hdr.size, "%-10lld", (vlong)d->length);
+	memmove(bp->hdr.fmag, ARFMAG, 2);
 	bp->size = d->length;
 	bp->date = d->mtime;
 	arread(b, bp, bp->size);
@@ -809,7 +816,7 @@ rl(int fd)
 {
 
 	Biobuf b;
-	char *cp;
+	byte *cp;
 	struct ar_hdr a;
 	long len;
 
@@ -822,14 +829,14 @@ rl(int fd)
 	len = symdefsize;
 	if(len&01)
 		len++;
-	sprint(a.date, "%-12ld", 0); //PAD: time(0)); for reproducible build
-	sprint(a.uid, "%-6d", 0);
-	sprint(a.gid, "%-6d", 0);
-	sprint(a.mode, "%-8o", 0644);
-	sprint(a.size, "%-10ld", len);
-	strncpy(a.fmag, ARFMAG, 2);
-	strcpy(a.name, symdef);
-	for (cp = strchr(a.name, 0);		/* blank pad on right */
+	sprint((char*)a.date, "%-12ld", Dflag ? 0 : (long)time(0));
+	sprint((char*)a.uid, "%-6d", 0);
+	sprint((char*)a.gid, "%-6d", 0);
+	sprint((char*)a.mode, "%-8o", 0644);
+	sprint((char*)a.size, "%-10ld", len);
+	memmove(a.fmag, ARFMAG, 2);
+	strcpy((char*)a.name, symdef);
+	for (cp = memchr(a.name, 0, sizeof(a.name));		/* blank pad on right */
 		cp < a.name+sizeof(a.name); cp++)
 			*cp = ' ';
 	if(HEADER_IO(Bwrite, &b, a))
@@ -973,8 +980,8 @@ longt(Armember *bp)
 {
 	char *cp;
 
-	pmode(strtoul(bp->hdr.mode, 0, 8));
-	Bprint(&bout, "%3ld/%1ld", atol(bp->hdr.uid), atol(bp->hdr.gid));
+	pmode(strtoul((char*)bp->hdr.mode, 0, 8));
+	Bprint(&bout, "%3ld/%1ld", atol((char*)bp->hdr.uid), atol((char*)bp->hdr.gid));
 	Bprint(&bout, "%7ld", bp->size);
 	cp = ctime(bp->date);
 	Bprint(&bout, " %-12.12s %-4.4s ", cp+4, cp+24);
